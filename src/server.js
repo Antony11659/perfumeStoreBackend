@@ -35,7 +35,7 @@ fastify.get("/health", async () => {
 // START TEMPORARY SECTION
 
 fastify.get("/raspiv/session", async () => {
-  const products = getRaspivSession();
+  const products = await getRaspivSession();
 
   return products;
 });
@@ -43,7 +43,7 @@ fastify.get("/raspiv/session", async () => {
 fastify.post("/raspiv/session", async (request, reply) => {
   const products = request.body;
 
-  saveRaspivSession(products);
+  await saveRaspivSession(products);
 
   return {
     success: true

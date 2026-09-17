@@ -2,24 +2,32 @@
 // Stores the current Raspiv workflow until the database-backed
 // order/session system is implemented
 
-import fs from "node:fs";
+import { supabase } from "../lib/supabase.js";
 
-const RASPIV_SESSION_FILE = "./data/raspiv-session.json";
-
-export const saveRaspivSession = (products) => {
-  fs.mkdirSync("./data", { recursive: true });
+export const saveRaspivSession = async (products) => {
+    const { error } = await supabase
+      .from("raspiv_session")
+      .upsert({
+        id: 1,
+        products: products,
+        updated_at: new Date().toISOString()
+      });
   
-  fs.writeFileSync(
-    RASPIV_SESSION_FILE,
-    JSON.stringify(products, null, 2)
-  );
-};
+    if (error) {
+      throw error;
+    }
+  };
 
-export const getRaspivSession = () => {
-    const data = fs.readFileSync(
-      RASPIV_SESSION_FILE,
-      "utf8"
-    );
+  export const getRaspivSession = async () => {
+    const { data, error } = await supabase
+      .from("raspiv_session")
+      .select("products")
+      .eq("id", 1)
+      .single();
   
-    return JSON.parse(data);
+    if (error) {
+      throw error;
+    }
+  
+    return data.products;
   };
