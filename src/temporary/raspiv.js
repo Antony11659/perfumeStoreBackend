@@ -7,6 +7,8 @@ import fs from "node:fs";
 const RASPIV_SESSION_FILE = "./data/raspiv-session.json";
 
 export const saveRaspivSession = (products) => {
+  fs.mkdirSync("./data", { recursive: true });
+  
   fs.writeFileSync(
     RASPIV_SESSION_FILE,
     JSON.stringify(products, null, 2)
