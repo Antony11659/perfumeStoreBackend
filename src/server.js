@@ -1,6 +1,8 @@
 import Fastify from "fastify";
 import { supabase } from "./lib/supabase.js";
 
+import { saveRaspivSession, getRaspivSession } from "./temporary/raspiv.js"; // should be deleted 
+
 const fastify = Fastify({
   logger: true,
 });
@@ -23,41 +25,32 @@ fastify.get("/perfumes", async (request, reply) => {
     return data;
   });
 
-// fastify.post("/perfumes", async (request, reply) => {
-//     const id = Number(request.body.id);
-//     const { name, brand, price } = request.body;
-//     const newItem = {
-//         id: 3,
-//         name,
-//         brand,
-//         price
-//     }
-//     if(name.length > 0 && brand.length > 0 && price >= 0) {
-//         perfumes.push(newItem);
-//         reply.code(201).send(perfumes);
-//     }else{
-//         reply.code(404).send('Error to add a new item')
-//     }
-// });
-
-// fastify.get('/perfumes/:id', async (request, reply) => {
-//     const id = Number(request.params.id);
-//     const item = perfumes.find(el => el.id === id);
-
-//     if (!item) {
-//         reply.code(404).send("Perfume not found");
-//         return;
-//     }
-
-//     return item;
-// });
-
 fastify.get("/health", async () => {
   return {
     status: "ok",
     message: "Perfume Store API is running",
   };
 });
+
+// START TEMPORARY SECTION
+
+fastify.get("/raspiv/session", async () => {
+  const products = getRaspivSession();
+
+  return products;
+});
+
+fastify.post("/raspiv/session", async (request, reply) => {
+  const products = request.body;
+
+  saveRaspivSession(products);
+
+  return {
+    success: true
+  };
+});
+
+// END TEMPORARY SECTION
 
 const start = async () => {
   try {
