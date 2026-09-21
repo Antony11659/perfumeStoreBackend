@@ -1,5 +1,8 @@
 import Fastify from "fastify";
-import { supabase } from "./lib/supabase.js";
+import swagger from "@fastify/swagger";
+import swaggerUi from "@fastify/swagger-ui";
+
+import perfumeRoutes from "./modules/perfumes/perfumesRoutes.js";
 
 import { saveRaspivSession, getRaspivSession } from "./temporary/raspiv.js"; // should be deleted 
 
@@ -7,23 +10,30 @@ const fastify = Fastify({
   logger: true,
 });
 
+await fastify.register(swagger, {
+  openapi: {
+    openapi: "3.0.3",
+    info: {
+      title: "Perfume Store ERP API",
+      description: "API for managing the perfume catalogue and ERP operations",
+      version: "1.0.0",
+    },
+    tags: [
+      {
+        name: "Perfumes",
+        description: "Perfume catalogue endpoints",
+      },
+    ],
+  },
+});
 
-fastify.get("/perfumes", async (request, reply) => {
-    const { data, error } = await supabase
-      .from("perfumes")
-      .select("*")
-      .order("name");
-  
-    if (error) {
-      fastify.log.error(error);
-  
-      return reply.code(500).send({
-        message: "Failed to load perfumes",
-      });
-    }
-  
-    return data;
-  });
+await fastify.register(swaggerUi, {
+  routePrefix: "/documentation",
+});
+
+await fastify.register(perfumeRoutes, {
+  prefix: "/perfumes",
+});
 
 fastify.get("/health", async () => {
   return {
@@ -31,6 +41,7 @@ fastify.get("/health", async () => {
     message: "Perfume Store API is running",
   };
 });
+
 
 // START TEMPORARY SECTION
 

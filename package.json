@@ -21,6 +21,8 @@
   "homepage": "https://github.com/Antony11659/perfumeStoreBackend#readme",
   "description": "",
   "dependencies": {
+    "@fastify/swagger": "^9.8.1",
+    "@fastify/swagger-ui": "^6.1.1",
     "@supabase/supabase-js": "^2.116.0",
     "dotenv": "^17.4.2",
     "fastify": "^5.12.3"
