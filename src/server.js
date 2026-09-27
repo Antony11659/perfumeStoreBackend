@@ -1,8 +1,12 @@
+import "dotenv/config";
+
 import Fastify from "fastify";
 import swagger from "@fastify/swagger";
 import swaggerUi from "@fastify/swagger-ui";
 
+
 import perfumeRoutes from "./modules/perfumes/perfumesRoutes.js";
+import ozonRoutes from "./modules/ozon/ozonRoutes.js";
 
 import { saveRaspivSession, getRaspivSession } from "./temporary/raspiv.js"; // should be deleted 
 
@@ -35,12 +39,22 @@ await fastify.register(perfumeRoutes, {
   prefix: "/perfumes",
 });
 
+await fastify.register(ozonRoutes, {
+  prefix: "/ozon",
+});
+
 fastify.get("/health", async () => {
   return {
     status: "ok",
     message: "Perfume Store API is running",
   };
 });
+
+// START OZON SESSIONS SECTION
+
+
+
+// END OZON SESSIONS SECTION 
 
 
 // START TEMPORARY SECTION
