@@ -12,6 +12,21 @@ export default async function ozonRoutes(fastify) {
       return reply.code(201).send(savedSession);
     });
 
+    fastify.get("/session", async (request, reply) => {
+      try {
+        const session = await getOzonSession();
+    
+        return session;
+    
+      } catch (error) {
+        fastify.log.error(error);
+    
+        return reply.code(500).send({
+          error: error.message
+        });
+      }
+    });
+
     fastify.get("/packaging", async (request, reply) => {
         const rawOrders = await getOzonSession();
         const preparedOrders = preparePackagingOrders(rawOrders);
