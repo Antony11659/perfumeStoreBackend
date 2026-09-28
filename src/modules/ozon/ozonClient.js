@@ -51,9 +51,9 @@ const shops = {
   
         if (!response.ok) {
           const errorBody = await response.text();
-  
+        
           throw new Error(
-            `Ozon API error ${response.status}: ${errorBody}`
+            `Ozon API error for shop "${shopName}" ${response.status}: ${errorBody}`
           );
         }
   
