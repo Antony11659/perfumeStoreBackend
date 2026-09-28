@@ -1,7 +1,4 @@
-console.log("RASPIV ENV CHECK:", {
-  clientIdExists: !!process.env.OZON_CLIENT_ID_RASPIV,
-  apiKeyExists: !!process.env.OZON_API_KEY_RASPIV,
-});
+
 const shops = {
     raspiv: {
       clientId: process.env.OZON_CLIENT_ID_RASPIV,
