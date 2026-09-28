@@ -1,6 +1,8 @@
 import "dotenv/config";
 
 import Fastify from "fastify";
+import cors from "@fastify/cors";
+
 import swagger from "@fastify/swagger";
 import swaggerUi from "@fastify/swagger-ui";
 
@@ -12,6 +14,10 @@ import { saveRaspivSession, getRaspivSession } from "./temporary/raspiv.js"; // 
 
 const fastify = Fastify({
   logger: true,
+});
+
+await fastify.register(cors, {
+  origin: true,
 });
 
 await fastify.register(swagger, {
