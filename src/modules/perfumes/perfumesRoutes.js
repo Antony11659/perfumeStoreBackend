@@ -2,6 +2,7 @@ import { supabase } from "../../lib/supabase.js";
 import {
   getPerfumesSchema,
   getPerfumeByIdSchema,
+  updatePerfumeSchema,
 } from "./perfumesSchemas.js";
 
 export default async function perfumeRoutes(fastify) {
@@ -149,5 +150,63 @@ export default async function perfumeRoutes(fastify) {
   
       shop_products: [],
     };
+  });
+
+  fastify.patch("/:id", {
+    schema: updatePerfumeSchema,
+  }, async (request, reply) => {
+  
+    const { id: perfumeId } = request.params;
+  
+    const {
+      name,
+      gender,
+      fragrance_family,
+    } = request.body;
+  
+    const updates = {
+      updated_at: new Date().toISOString(),
+    };
+  
+    if (name !== undefined) {
+      updates.name = name.trim();
+    }
+  
+    if (gender !== undefined) {
+      updates.gender = gender;
+    }
+  
+    if (fragrance_family !== undefined) {
+      updates.fragrance_family = fragrance_family;
+    }
+  
+    const { data, error } = await supabase
+      .from("perfumes")
+      .update(updates)
+      .eq("id", perfumeId)
+      .select(`
+        id,
+        name,
+        gender,
+        fragrance_family,
+        updated_at
+      `)
+      .maybeSingle();
+  
+    if (error) {
+      request.log.error(error);
+  
+      return reply.code(500).send({
+        message: "Failed to update perfume",
+      });
+    }
+  
+    if (!data) {
+      return reply.code(404).send({
+        message: "Perfume not found",
+      });
+    }
+  
+    return data;
   });
 }

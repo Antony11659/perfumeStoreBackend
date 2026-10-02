@@ -231,6 +231,7 @@ export const getPerfumesSchema = {
 };
 
 
+
 export const getPerfumeByIdSchema = {
   tags: ["Perfumes"],
 
@@ -273,6 +274,134 @@ export const getPerfumeByIdSchema = {
     500: {
       ...errorSchema,
       description: "Database error",
+    },
+  },
+};
+
+
+export const updatePerfumeSchema = {
+  tags: ["Perfumes"],
+
+  summary: "Update perfume",
+
+  description:
+    "Updates the basic information of an existing perfume.",
+
+  params: {
+    type: "object",
+    additionalProperties: false,
+
+    properties: {
+      id: {
+        type: "integer",
+        minimum: 1,
+        description: "Perfume ID",
+      },
+    },
+
+    required: ["id"],
+  },
+
+  body: {
+    type: "object",
+    additionalProperties: false,
+
+    properties: {
+      name: {
+        type: "string",
+        minLength: 1,
+      },
+
+      gender: {
+        type: "string",
+        enum: ["M", "W", "U"],
+      },
+
+      fragrance_family: {
+        anyOf: [
+          { type: "string" },
+          { type: "null" },
+        ],
+      },
+    },
+
+    minProperties: 1,
+  },
+
+  response: {
+    200: {
+      description: "Perfume updated successfully",
+
+      type: "object",
+      additionalProperties: false,
+
+      properties: {
+        id: {
+          type: "integer",
+        },
+
+        name: {
+          type: "string",
+        },
+
+        gender: {
+          type: "string",
+          enum: ["M", "W", "U"],
+        },
+
+        fragrance_family: {
+          anyOf: [
+            { type: "string" },
+            { type: "null" },
+          ],
+        },
+
+        updated_at: {
+          type: "string",
+          format: "date-time",
+        },
+      },
+
+      required: [
+        "id",
+        "name",
+        "gender",
+        "fragrance_family",
+        "updated_at",
+      ],
+    },
+
+    400: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        message: {
+          type: "string",
+        },
+      },
+      required: ["message"],
+    },
+
+    404: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        message: {
+          type: "string",
+        },
+      },
+      required: ["message"],
+    },
+
+    500: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        message: {
+          type: "string",
+        },
+      },
+      required: ["message"],
     },
   },
 };

@@ -18,6 +18,14 @@ const fastify = Fastify({
 
 await fastify.register(cors, {
   origin: true,
+  methods: [
+    "GET",
+    "POST",
+    "PATCH",
+    "PUT",
+    "DELETE",
+    "OPTIONS",
+  ],
 });
 
 await fastify.register(swagger, {
