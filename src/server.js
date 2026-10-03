@@ -6,9 +6,10 @@ import cors from "@fastify/cors";
 import swagger from "@fastify/swagger";
 import swaggerUi from "@fastify/swagger-ui";
 
-
+import brandsRoutes from "./modules/perfumes/brandsRoutes.js";
 import perfumeRoutes from "./modules/perfumes/perfumesRoutes.js";
 import ozonRoutes from "./modules/ozon/ozonRoutes.js";
+import shopsRoutes from "./modules/perfumes/shopsRoutes.js";
 
 import { saveRaspivSession, getRaspivSession } from "./temporary/raspiv.js"; // should be deleted 
 
@@ -51,6 +52,14 @@ await fastify.register(swaggerUi, {
 
 await fastify.register(perfumeRoutes, {
   prefix: "/perfumes",
+});
+
+fastify.register(brandsRoutes, {
+  prefix: "/brands",
+});
+
+fastify.register(shopsRoutes, {
+  prefix: "/shops",
 });
 
 await fastify.register(ozonRoutes, {
