@@ -62,7 +62,7 @@ export default async function ozonRoutes(fastify) {
     try {
       const rawOrders = await getOzonSession();
 
-      const preparedOrders = preparePackagingOrders(rawOrders);
+      const preparedOrders = await preparePackagingOrders(rawOrders);
 
       const {
         startNum,

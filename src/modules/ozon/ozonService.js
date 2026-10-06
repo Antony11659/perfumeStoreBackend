@@ -1,12 +1,5 @@
 import { createOzonClient } from "./ozonClient.js";
-import fs from "node:fs";
-
-const productsData = JSON.parse(
-  fs.readFileSync(
-    new URL("../../temporary/data.json", import.meta.url),
-    "utf8"
-  )
-);
+import { supabase } from "../../lib/supabase.js";
 
 
 export const getShopOrders = async (shopName) => {
@@ -59,12 +52,19 @@ export const getShopOrders = async (shopName) => {
 };
 
 export const createOzonShopsSession = async () => {
-    const shops = [
-      "raspiv",
-      "motive",
-      "laDePurfum",
-      "dubaiOil"
-    ];
+    const { data, error } = await supabase
+      .from("shops")
+      .select("code")
+      .eq("marketplace", "ozon")
+      .eq("is_active", true);
+
+    if (error) {
+      throw new Error(
+        `Failed to load Ozon shops: ${error.message}`
+      );
+    }
+
+    const shops = data.map((shop) => shop.code);
   
     const shopsOrders = await Promise.all(
       shops.map(async (shop) => {
@@ -99,15 +99,15 @@ export const createOzonShopsSession = async () => {
   };
 
 
-  const prepareProduct = (product) => {
+  const prepareProduct = (product, productsBySku) => {
     const sku = String(product.sku);
   
-    const productData = productsData[sku];
+    const productData = productsBySku.get(sku);
   
     if (!productData) {
       return {
         sku,
-        name: null,
+        name: product.offer_id,
         volume: null,
         quantity: product.quantity,
         unknown: true,
@@ -124,7 +124,55 @@ export const createOzonShopsSession = async () => {
   };
   
   
-  export const preparePackagingOrders = (session) => {
+  export const preparePackagingOrders = async (session) => {
+    const skus = [...new Set(session.shops.flatMap((shop) => {
+      return shop.orders.flatMap((order) => {
+        return order.products.map((product) => String(product.sku));
+      });
+    }))];
+
+    const productsBySku = new Map();
+
+    if (skus.length > 0) {
+      const { data, error } = await supabase
+        .from("shop_products")
+        .select("sku, perfume_id, volume_ml")
+        .in("sku", skus);
+
+      if (error) {
+        throw new Error(
+          `Failed to load packaging products: ${error.message}`
+        );
+      }
+
+      const perfumeIds = [...new Set(data.map((product) => product.perfume_id))];
+      const perfumeNamesById = new Map();
+
+      if (perfumeIds.length > 0) {
+        const { data: perfumes, error: perfumesError } = await supabase
+          .from("perfumes")
+          .select("id, name")
+          .in("id", perfumeIds);
+
+        if (perfumesError) {
+          throw new Error(
+            `Failed to load packaging perfumes: ${perfumesError.message}`
+          );
+        }
+
+        for (const perfume of perfumes) {
+          perfumeNamesById.set(perfume.id, perfume.name);
+        }
+      }
+
+      for (const product of data) {
+        productsBySku.set(String(product.sku), {
+          name: perfumeNamesById.get(product.perfume_id),
+          volume: product.volume_ml,
+        });
+      }
+    }
+
     const orders = session.shops.flatMap((shop) => {
       return shop.orders.map((order) => {
         const ii = order.scanit;
@@ -134,7 +182,7 @@ export const createOzonShopsSession = async () => {
           ii,
           orderNumber,
           displayedNum: normalizeNum(ii, orderNumber),
-          products: order.products.map(order => prepareProduct(order)),
+          products: order.products.map(order => prepareProduct(order, productsBySku)),
           shop: shop.shop,
         };
       });
@@ -189,5 +237,3 @@ export const createOzonShopsSession = async () => {
       orders: pageOrders,
     };
   };
-
-
