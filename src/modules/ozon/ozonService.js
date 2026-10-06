@@ -194,8 +194,8 @@ export const createOzonShopsSession = async () => {
 
   
 
-  export const prepareStickingLabels = async (session) => {
-    const orders = await preparePackagingOrders(session);
+  export const prepareStickingLabels = async (session, preparedOrders) => {
+    const orders = preparedOrders ?? await preparePackagingOrders(session);
     const labelsByName = new Map();
     const unknownProductsByShopSku = new Map();
 
@@ -239,6 +239,54 @@ export const createOzonShopsSession = async () => {
     return {
       labels,
       unknownProducts: [...unknownProductsByShopSku.values()],
+    };
+  };
+
+
+  export const prepareStickingPlan = async (session) => {
+    const orders = await preparePackagingOrders(session);
+    const { labels, unknownProducts } = await prepareStickingLabels(session, orders);
+    const volumesByName = new Map();
+
+    for (const order of orders) {
+      for (const product of order.products) {
+        if (product.unknown || !product.name) {
+          continue;
+        }
+
+        if (!volumesByName.has(product.name)) {
+          volumesByName.set(product.name, new Map());
+        }
+
+        const volumes = volumesByName.get(product.name);
+        volumes.set(product.volume, (volumes.get(product.volume) ?? 0) + product.quantity);
+      }
+    }
+
+    const regular = [];
+    const unique = {};
+
+    // Use the label order, including its stable ordering for equal totals.
+    for (const { name, quantity: total } of labels) {
+      const bottles = [...volumesByName.get(name)]
+        .filter(([, quantity]) => quantity > 0)
+        .map(([volume, quantity]) => ({ volume, quantity }))
+        .sort((a, b) => a.volume - b.volume);
+
+      if (total === 1) {
+        const volume = bottles[0].volume;
+        unique[volume] ??= [];
+        unique[volume].push(name);
+      } else if (total > 1) {
+        regular.push({ name, bottles, total });
+      }
+    }
+
+    return {
+      updatedAt: session.updated_at,
+      regular,
+      unique,
+      unknownProducts,
     };
   };
 

@@ -388,6 +388,66 @@ const errorSchema = {
   };
 
 
+  export const getStickingSchema = {
+    tags: ["Ozon"],
+    summary: "Get sticking plan",
+    description:
+      "Uses the existing saved Ozon session and batch Supabase SKU resolution without fetching Ozon orders or creating a session. Regular perfumes have total quantity greater than one and follow the print-label order (total descending). Single bottles are grouped by volume in unique. Unknown products are excluded and aggregated by shop and SKU.",
+    response: {
+      200: {
+        description: "Sticking plan retrieved successfully",
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          updatedAt: {
+            type: "string",
+            format: "date-time",
+            description: "The saved session's updated_at timestamp.",
+          },
+          regular: {
+            type: "array",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                name: { type: "string" },
+                bottles: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    additionalProperties: false,
+                    properties: {
+                      volume: { type: "number" },
+                      quantity: { type: "integer", minimum: 1 },
+                    },
+                    required: ["volume", "quantity"],
+                  },
+                },
+                total: { type: "integer", minimum: 2 },
+              },
+              required: ["name", "bottles", "total"],
+            },
+          },
+          unique: {
+            type: "object",
+            description: "Canonical perfume names grouped by volume in ml.",
+            additionalProperties: {
+              type: "array",
+              items: { type: "string" },
+            },
+          },
+          unknownProducts: getPrintStickingLabelsSchema.response[200].properties.unknownProducts,
+        },
+        required: ["updatedAt", "regular", "unique", "unknownProducts"],
+      },
+      500: {
+        ...errorSchema,
+        description: "Failed to load the saved session or prepare the sticking plan",
+      },
+    },
+  };
+
+
   export const getPackagingSchema = {
     tags: ["Ozon"],
   
