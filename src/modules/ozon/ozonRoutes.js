@@ -2,6 +2,7 @@ import {
   createOzonShopsSession,
   getPackagingPage,
   preparePackagingOrders,
+  prepareStickingLabels,
 } from "./ozonService.js";
 
 import {
@@ -13,6 +14,7 @@ import {
   createOzonSessionSchema,
   getOzonSessionSchema,
   getPackagingSchema,
+  getPrintStickingLabelsSchema,
 } from "./ozonSchemas.js";
 
 
@@ -45,6 +47,24 @@ export default async function ozonRoutes(fastify) {
       const session = await getOzonSession();
 
       return session;
+
+    } catch (error) {
+      request.log.error(error);
+
+      return reply.code(500).send({
+        error: error.message,
+      });
+    }
+  });
+
+
+  fastify.get("/print-sticking-labels", {
+    schema: getPrintStickingLabelsSchema,
+  }, async (request, reply) => {
+    try {
+      const session = await getOzonSession();
+
+      return await prepareStickingLabels(session);
 
     } catch (error) {
       request.log.error(error);

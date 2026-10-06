@@ -322,6 +322,72 @@ const errorSchema = {
   };
   
   
+  export const getPrintStickingLabelsSchema = {
+    tags: ["Ozon"],
+
+    summary: "Get sticking labels",
+
+    description:
+      "Aggregates known products from all shops and orders in the saved Ozon session by canonical perfume name, combining volumes and sorting by quantity descending. Returns unknown products separately, aggregated by shop and SKU.",
+
+    response: {
+      200: {
+        description: "Printable sticking labels retrieved successfully",
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          labels: {
+            type: "array",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                name: {
+                  type: "string",
+                },
+                quantity: {
+                  type: "integer",
+                  minimum: 1,
+                },
+              },
+              required: ["name", "quantity"],
+            },
+          },
+          unknownProducts: {
+            type: "array",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                sku: {
+                  type: "string",
+                },
+                offer_id: {
+                  type: "string",
+                },
+                quantity: {
+                  type: "integer",
+                  minimum: 1,
+                },
+                shop: {
+                  type: "string",
+                },
+              },
+              required: ["sku", "offer_id", "quantity", "shop"],
+            },
+          },
+        },
+        required: ["labels", "unknownProducts"],
+      },
+
+      500: {
+        ...errorSchema,
+        description: "Failed to load sticking labels",
+      },
+    },
+  };
+
+
   export const getPackagingSchema = {
     tags: ["Ozon"],
   

@@ -194,6 +194,55 @@ export const createOzonShopsSession = async () => {
 
   
 
+  export const prepareStickingLabels = async (session) => {
+    const orders = await preparePackagingOrders(session);
+    const labelsByName = new Map();
+    const unknownProductsByShopSku = new Map();
+
+    for (const order of orders) {
+      for (const product of order.products) {
+        if (product.unknown) {
+          const key = JSON.stringify([order.shop, product.sku]);
+          const unknownProduct = unknownProductsByShopSku.get(key);
+
+          if (unknownProduct) {
+            unknownProduct.quantity += product.quantity;
+          } else {
+            unknownProductsByShopSku.set(key, {
+              sku: product.sku,
+              // prepareProduct preserves the raw offer_id as name for unknown SKUs.
+              offer_id: product.name,
+              quantity: product.quantity,
+              shop: order.shop,
+            });
+          }
+
+          continue;
+        }
+
+        if (!product.name) {
+          continue;
+        }
+
+        labelsByName.set(
+          product.name,
+          (labelsByName.get(product.name) ?? 0) + product.quantity
+        );
+      }
+    }
+
+    const labels = [...labelsByName].map(([name, quantity]) => ({
+      name,
+      quantity,
+    })).sort((a, b) => b.quantity - a.quantity);
+
+    return {
+      labels,
+      unknownProducts: [...unknownProductsByShopSku.values()],
+    };
+  };
+
+
   export const getPackagingPage = (
     orders,
     {
