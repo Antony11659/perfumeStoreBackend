@@ -10,7 +10,7 @@ const shops = {
       apiKey: process.env.OZON_API_KEY_MOTIVE,
     },
   
-    laDePurfum: {
+    laDeParfum: {
       clientId: process.env.OZON_CLIENT_ID_LA_DE_PURFUM,
       apiKey: process.env.OZON_API_KEY_LA_DE_PURFUM,
     },
