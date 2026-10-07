@@ -30,8 +30,30 @@ export const getOzonSession = async () => {
     .single();
 
   if (error) {
+    let supabaseHostname = null;
+    let supabaseHttps = false;
+
+    try {
+      const url = new URL(process.env.SUPABASE_URL);
+      supabaseHostname = url.hostname;
+      supabaseHttps = url.protocol === "https:";
+    } catch {
+      // Keep diagnostics from replacing the original Supabase error.
+    }
+
+    console.error("getOzonSession Supabase diagnostic", JSON.stringify({
+      message: error.message,
+      details: error.details,
+      hint: error.hint,
+      code: error.code,
+      supabaseUrlExists: Boolean(process.env.SUPABASE_URL),
+      supabaseHostname,
+      supabaseHttps,
+    }));
+
     throw new Error(
-      `Failed to get Ozon session: ${error.message}`
+      `Failed to get Ozon session: ${error.message}`,
+      { cause: error }
     );
   }
 
