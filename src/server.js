@@ -10,6 +10,7 @@ import brandsRoutes from "./modules/perfumes/brandsRoutes.js";
 import perfumeRoutes from "./modules/perfumes/perfumesRoutes.js";
 import ozonRoutes from "./modules/ozon/ozonRoutes.js";
 import shopsRoutes from "./modules/perfumes/shopsRoutes.js";
+import pricingRoutes from "./modules/pricing/pricingRoutes.js";
 
 import { saveRaspivSession, getRaspivSession } from "./temporary/raspiv.js"; // should be deleted 
 
@@ -42,6 +43,12 @@ await fastify.register(swagger, {
         name: "Perfumes",
         description: "Perfume catalogue endpoints",
       },
+      {
+
+        name: "Pricing",
+        description: "Website, discount and wholesale pricing",
+    
+      },
     ],
   },
 });
@@ -64,6 +71,10 @@ fastify.register(shopsRoutes, {
 
 await fastify.register(ozonRoutes, {
   prefix: "/ozon",
+});
+
+fastify.register(pricingRoutes, {
+  prefix: "/prices",
 });
 
 fastify.get("/health", async () => {
