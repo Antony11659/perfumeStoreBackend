@@ -140,23 +140,36 @@ export default async function shopsRoutes(fastify) {
       }
 
 
-      // 3. Get all SKU mappings that already exist
-      // for THIS shop in Supabase
-      const { data: mappedProducts, error: mappedError } = await supabase
-        .from("shop_products")
-        .select(`
-          sku
-        `)
-        .eq("shop_id", shopId);
+// 3. Get ALL SKU mappings that already exist
+// for THIS shop in Supabase
+const mappedProducts = [];
 
+const pageSize = 1000;
+let from = 0;
 
-      if (mappedError) {
-        request.log.error(mappedError);
+while (true) {
+  const { data, error } = await supabase
+    .from("shop_products")
+    .select("sku")
+    .eq("shop_id", shopId)
+    .range(from, from + pageSize - 1);
 
-        return reply.code(500).send({
-          message: "Failed to load mapped shop products",
-        });
-      }
+  if (error) {
+    request.log.error(error);
+
+    return reply.code(500).send({
+      message: "Failed to load mapped shop products",
+    });
+  }
+
+  mappedProducts.push(...data);
+
+  if (data.length < pageSize) {
+    break;
+  }
+
+  from += pageSize;
+}
 
 
       // 4. Create fast lookup Set
