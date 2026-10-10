@@ -195,50 +195,227 @@ export const createOzonShopsSession = async () => {
   
 
   export const prepareStickingLabels = async (session, preparedOrders) => {
-    const orders = preparedOrders ?? await preparePackagingOrders(session);
+    const orders =
+      preparedOrders ?? await preparePackagingOrders(session);
+  
     const labelsByName = new Map();
+    const volumesByName = new Map();
     const unknownProductsByShopSku = new Map();
-
+  
+  
+    // --------------------------------------------------
+    // COLLECT PRODUCTS
+    // --------------------------------------------------
+  
     for (const order of orders) {
       for (const product of order.products) {
+  
+        // UNKNOWN SKU
         if (product.unknown) {
-          const key = JSON.stringify([order.shop, product.sku]);
-          const unknownProduct = unknownProductsByShopSku.get(key);
-
+          const key = JSON.stringify([
+            order.shop,
+            product.sku
+          ]);
+  
+          const unknownProduct =
+            unknownProductsByShopSku.get(key);
+  
           if (unknownProduct) {
             unknownProduct.quantity += product.quantity;
           } else {
             unknownProductsByShopSku.set(key, {
               sku: product.sku,
-              // prepareProduct preserves the raw offer_id as name for unknown SKUs.
               offer_id: product.name,
               quantity: product.quantity,
               shop: order.shop,
             });
           }
-
+  
           continue;
         }
-
+  
+  
         if (!product.name) {
           continue;
         }
-
+  
+  
+        // TOTAL QUANTITY BY PERFUME NAME
         labelsByName.set(
           product.name,
-          (labelsByName.get(product.name) ?? 0) + product.quantity
+          (labelsByName.get(product.name) ?? 0) +
+            product.quantity
+        );
+  
+  
+        // QUANTITY BY PERFUME + VOLUME
+        if (!volumesByName.has(product.name)) {
+          volumesByName.set(
+            product.name,
+            new Map()
+          );
+        }
+  
+        const volumes =
+          volumesByName.get(product.name);
+  
+        volumes.set(
+          product.volume,
+          (volumes.get(product.volume) ?? 0) +
+            product.quantity
         );
       }
     }
-
-    const labels = [...labelsByName].map(([name, quantity]) => ({
-      name,
-      quantity,
-    })).sort((a, b) => b.quantity - a.quantity);
-
+  
+  
+    // --------------------------------------------------
+    // SORT PERFUMES BY TOTAL QUANTITY
+    // --------------------------------------------------
+  
+    const sortedLabels = [...labelsByName]
+      .map(([name, quantity]) => ({
+        name,
+        quantity,
+      }))
+      .sort(
+        (a, b) =>
+          b.quantity - a.quantity
+      );
+  
+  
+    // --------------------------------------------------
+    // REGULAR + UNIQUE
+    // --------------------------------------------------
+  
+    const regularLabels = [];
+    const uniqueByVolume = new Map();
+  
+  
+    for (const label of sortedLabels) {
+      const {
+        name,
+        quantity
+      } = label;
+  
+  
+      // REGULAR PERFUME
+      if (quantity > 1) {
+        regularLabels.push({
+          name,
+          quantity,
+        });
+  
+        continue;
+      }
+  
+  
+      // UNIQUE PERFUME
+      const volumes =
+        volumesByName.get(name);
+  
+      if (!volumes) {
+        continue;
+      }
+  
+  
+      const volume =
+        [...volumes.keys()][0];
+  
+  
+      if (!uniqueByVolume.has(volume)) {
+        uniqueByVolume.set(
+          volume,
+          []
+        );
+      }
+  
+  
+      uniqueByVolume
+        .get(volume)
+        .push(name);
+    }
+  
+  
+    // --------------------------------------------------
+    // FINAL PRINTER LABEL ARRAY
+    // --------------------------------------------------
+  
+    const labels = [
+      ...regularLabels
+    ];
+  
+  
+    const sortedVolumes =
+      [...uniqueByVolume.keys()]
+        .sort(
+          (a, b) =>
+            Number(a) - Number(b)
+        );
+  
+  
+    // --------------------------------------------------
+    // UNIQUE GROUPS
+    //
+    // Structure:
+    //
+    // blank
+    // ОДИНОЧНЫЕ 1 МЛ
+    // perfume
+    // perfume
+    //
+    // blank
+    // ОДИНОЧНЫЕ 3 МЛ
+    // perfume
+    // perfume
+    //
+    // blank
+    // --------------------------------------------------
+  
+    for (const volume of sortedVolumes) {
+      const perfumeNames =
+        uniqueByVolume.get(volume);
+  
+  
+      // START OF THIS UNIQUE GROUP
+      // Also ends the previous unique group.
+      labels.push({
+        name: "",
+        quantity: 1,
+      });
+  
+  
+      // GROUP HEADER
+      labels.push({
+        name: `ОДИНОЧНЫЕ ${volume} МЛ`,
+        quantity: 1,
+      });
+  
+  
+      // PERFUMES
+      for (const name of perfumeNames) {
+        labels.push({
+          name,
+          quantity: 1,
+        });
+      }
+    }
+  
+  
+    // FINAL BLANK
+    // Ends the last unique group.
+    if (sortedVolumes.length > 0) {
+      labels.push({
+        name: "",
+        quantity: 1,
+      });
+    }
+  
+  
     return {
       labels,
-      unknownProducts: [...unknownProductsByShopSku.values()],
+  
+      unknownProducts:
+        [...unknownProductsByShopSku.values()],
     };
   };
 

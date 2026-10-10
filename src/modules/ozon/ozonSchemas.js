@@ -328,7 +328,7 @@ const errorSchema = {
     summary: "Get sticking labels",
 
     description:
-      "Aggregates known products from all shops and orders in the saved Ozon session by canonical perfume name, combining volumes and sorting by quantity descending. Returns unknown products separately, aggregated by shop and SKU.",
+  "Returns the printer-ready sticking label sequence for the current saved Ozon session. Perfumes with total quantity greater than one are returned first, sorted by total quantity descending. Single-bottle perfumes are grouped by volume and emitted as unique-volume print blocks. Each unique block starts with an empty-name separator label, followed by an 'ОДИНОЧНЫЕ {volume} МЛ' header and the perfume labels. A final empty-name separator closes the last unique block. Unknown products are excluded from labels and returned separately, aggregated by shop and SKU.",
 
     response: {
       200: {
@@ -338,6 +338,8 @@ const errorSchema = {
         properties: {
           labels: {
             type: "array",
+            description:
+            "Printer-ready label sequence. An empty name is a separator used by the local printer service to delimit unique-volume print jobs.",
             items: {
               type: "object",
               additionalProperties: false,
