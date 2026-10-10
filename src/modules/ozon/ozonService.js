@@ -422,48 +422,109 @@ export const createOzonShopsSession = async () => {
 
   export const prepareStickingPlan = async (session) => {
     const orders = await preparePackagingOrders(session);
-    const { labels, unknownProducts } = await prepareStickingLabels(session, orders);
+  
+    const totalsByName = new Map();
     const volumesByName = new Map();
-
+    const unknownProductsByShopSku = new Map();
+  
     for (const order of orders) {
       for (const product of order.products) {
-        if (product.unknown || !product.name) {
+        if (product.unknown) {
+          const key = JSON.stringify([
+            order.shop,
+            product.sku
+          ]);
+  
+          const existing =
+            unknownProductsByShopSku.get(key);
+  
+          if (existing) {
+            existing.quantity += product.quantity;
+          } else {
+            unknownProductsByShopSku.set(key, {
+              sku: product.sku,
+              offer_id: product.name,
+              quantity: product.quantity,
+              shop: order.shop,
+            });
+          }
+  
           continue;
         }
-
-        if (!volumesByName.has(product.name)) {
-          volumesByName.set(product.name, new Map());
+  
+        if (!product.name) {
+          continue;
         }
-
-        const volumes = volumesByName.get(product.name);
-        volumes.set(product.volume, (volumes.get(product.volume) ?? 0) + product.quantity);
+  
+        totalsByName.set(
+          product.name,
+          (totalsByName.get(product.name) ?? 0) +
+            product.quantity
+        );
+  
+        if (!volumesByName.has(product.name)) {
+          volumesByName.set(
+            product.name,
+            new Map()
+          );
+        }
+  
+        const volumes =
+          volumesByName.get(product.name);
+  
+        volumes.set(
+          product.volume,
+          (volumes.get(product.volume) ?? 0) +
+            product.quantity
+        );
       }
     }
-
+  
+    const sortedPerfumes = [...totalsByName]
+      .map(([name, total]) => ({
+        name,
+        total,
+      }))
+      .sort(
+        (a, b) =>
+          b.total - a.total
+      );
+  
     const regular = [];
     const unique = {};
-
-    // Use the label order, including its stable ordering for equal totals.
-    for (const { name, quantity: total } of labels) {
+  
+    for (const { name, total } of sortedPerfumes) {
       const bottles = [...volumesByName.get(name)]
         .filter(([, quantity]) => quantity > 0)
-        .map(([volume, quantity]) => ({ volume, quantity }))
-        .sort((a, b) => a.volume - b.volume);
-
+        .map(([volume, quantity]) => ({
+          volume,
+          quantity,
+        }))
+        .sort(
+          (a, b) =>
+            a.volume - b.volume
+        );
+  
       if (total === 1) {
         const volume = bottles[0].volume;
+  
         unique[volume] ??= [];
         unique[volume].push(name);
       } else if (total > 1) {
-        regular.push({ name, bottles, total });
+        regular.push({
+          name,
+          bottles,
+          total,
+        });
       }
     }
-
+  
     return {
       updatedAt: session.updated_at,
       regular,
       unique,
-      unknownProducts,
+      unknownProducts:
+        [...unknownProductsByShopSku.values()],
     };
   };
 
