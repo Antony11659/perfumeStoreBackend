@@ -12,6 +12,7 @@ import ozonRoutes from "./modules/ozon/ozonRoutes.js";
 import shopsRoutes from "./modules/perfumes/shopsRoutes.js";
 import pricingRoutes from "./modules/pricing/pricingRoutes.js";
 import promoRoutes from "./modules/promo/promoRoutes.js";
+import websiteOrdersRoutes from "./modules/website/websiteOrdersRoutes.js";
 
 import { saveRaspivSession, getRaspivSession } from "./temporary/raspiv.js"; // should be deleted 
 
@@ -86,6 +87,10 @@ fastify.register(promoRoutes, {
   prefix: "/promo",
 });
 
+fastify.register(websiteOrdersRoutes, {
+  prefix: "/website",
+});
+
 fastify.get("/health", async () => {
   return {
     status: "ok",
@@ -93,11 +98,6 @@ fastify.get("/health", async () => {
   };
 });
 
-// START OZON SESSIONS SECTION
-
-
-
-// END OZON SESSIONS SECTION 
 
 
 // START TEMPORARY SECTION
