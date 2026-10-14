@@ -94,9 +94,15 @@ export async function exchangeAuthorizationCode(code) {
   try {
     data = JSON.parse(rawBody);
   } catch {
+    console.log(
+      "Ozon OAuth non-JSON body preview:",
+      rawBody.slice(0, 1000)
+    );
+  
     throw new Error(
       `Ozon OAuth returned non-JSON response. HTTP ${response.status}, Content-Type: ${contentType}`
     );
+  }
   }
 
   if (!response.ok) {
