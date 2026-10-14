@@ -79,18 +79,19 @@ export async function exchangeAuthorizationCode(code) {
     }
   );
 
-  const contentType = response.headers.get("content-type");
+  const contentType =
+    response.headers.get("content-type");
 
   const rawBody = await response.text();
-  
+
   console.log("Ozon OAuth response:", {
     status: response.status,
     contentType,
     responseUrl: response.url,
   });
-  
+
   let data;
-  
+
   try {
     data = JSON.parse(rawBody);
   } catch {
@@ -98,11 +99,10 @@ export async function exchangeAuthorizationCode(code) {
       "Ozon OAuth non-JSON body preview:",
       rawBody.slice(0, 1000)
     );
-  
+
     throw new Error(
       `Ozon OAuth returned non-JSON response. HTTP ${response.status}, Content-Type: ${contentType}`
     );
-  }
   }
 
   if (!response.ok) {
