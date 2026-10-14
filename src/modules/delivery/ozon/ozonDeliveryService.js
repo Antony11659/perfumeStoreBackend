@@ -79,7 +79,25 @@ export async function exchangeAuthorizationCode(code) {
     }
   );
 
-  const data = await response.json();
+  const contentType = response.headers.get("content-type");
+
+  const rawBody = await response.text();
+  
+  console.log("Ozon OAuth response:", {
+    status: response.status,
+    contentType,
+    responseUrl: response.url,
+  });
+  
+  let data;
+  
+  try {
+    data = JSON.parse(rawBody);
+  } catch {
+    throw new Error(
+      `Ozon OAuth returned non-JSON response. HTTP ${response.status}, Content-Type: ${contentType}`
+    );
+  }
 
   if (!response.ok) {
     throw new Error(
