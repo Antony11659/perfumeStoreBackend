@@ -61,7 +61,7 @@ export async function exchangeAuthorizationCode(code) {
   }
 
   const response = await fetch(
-    "https://xapi.ozon.ru/oauth/oauth/token",
+    "https://xapi.ozon.ru/oauth/token",
     {
       method: "POST",
 
