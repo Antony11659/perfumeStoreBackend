@@ -403,3 +403,197 @@ export async function createWebsiteOrder(payload) {
   };
 
 }
+
+export async function getWebsiteOrderRaspivItems(
+  orderId
+) {
+  // --------------------------------------------------
+  // 1. Load Raspiv shop
+  // --------------------------------------------------
+
+  const {
+    data: raspivShop,
+    error: shopError,
+  } = await supabase
+    .from("shops")
+    .select(`
+      id,
+      code
+    `)
+    .eq("code", "raspiv")
+    .eq("is_active", true)
+    .single();
+
+
+  if (shopError || !raspivShop) {
+    throw new Error(
+      "Active Raspiv shop not found"
+    );
+  }
+
+
+  // --------------------------------------------------
+  // 2. Load website order items
+  // --------------------------------------------------
+
+  const {
+    data: orderItems,
+    error: orderItemsError,
+  } = await supabase
+    .from("website_order_items")
+    .select(`
+      variant_id,
+      quantity
+    `)
+    .eq("order_id", orderId);
+
+
+  if (orderItemsError) {
+    throw new Error(
+      "Failed to load website order items"
+    );
+  }
+
+
+  if (
+    !orderItems ||
+    orderItems.length === 0
+  ) {
+    throw new Error(
+      "Website order has no items"
+    );
+  }
+
+
+  // --------------------------------------------------
+  // 3. Load perfume variants
+  // --------------------------------------------------
+
+  const variantIds = [
+    ...new Set(
+      orderItems.map(
+        (item) => item.variant_id
+      )
+    ),
+  ];
+
+
+  const {
+    data: variants,
+    error: variantsError,
+  } = await supabase
+    .from("perfume_variants")
+    .select(`
+      id,
+      perfume_id,
+      volume_ml
+    `)
+    .in("id", variantIds);
+
+
+  if (variantsError) {
+    throw new Error(
+      "Failed to load perfume variants"
+    );
+  }
+
+
+  if (
+    !variants ||
+    variants.length !== variantIds.length
+  ) {
+    throw new Error(
+      "One or more perfume variants are missing"
+    );
+  }
+
+
+  const variantMap = new Map(
+    variants.map((variant) => [
+      Number(variant.id),
+      variant,
+    ])
+  );
+
+
+  // --------------------------------------------------
+  // 4. Load Raspiv shop products
+  // --------------------------------------------------
+
+  const perfumeIds = [
+    ...new Set(
+      variants.map(
+        (variant) => variant.perfume_id
+      )
+    ),
+  ];
+
+
+  const {
+    data: shopProducts,
+    error: shopProductsError,
+  } = await supabase
+    .from("shop_products")
+    .select(`
+      perfume_id,
+      volume_ml,
+      sku
+    `)
+    .eq("shop_id", raspivShop.id)
+    .eq("is_active", true)
+    .eq("is_archived", false)
+    .in("perfume_id", perfumeIds);
+
+
+  if (shopProductsError) {
+    throw new Error(
+      "Failed to load Raspiv shop products"
+    );
+  }
+
+
+  // --------------------------------------------------
+  // 5. Create perfume + volume -> SKU lookup
+  // --------------------------------------------------
+
+  const skuMap = new Map(
+    shopProducts.map((product) => [
+      `${product.perfume_id}:${product.volume_ml}`,
+      product.sku,
+    ])
+  );
+
+
+  // --------------------------------------------------
+  // 6. Convert website items to Raspiv items
+  // --------------------------------------------------
+
+  return orderItems.map((item) => {
+    const variant =
+      variantMap.get(
+        Number(item.variant_id)
+      );
+
+
+    const key =
+      `${variant.perfume_id}:${variant.volume_ml}`;
+
+
+    const sku =
+      skuMap.get(key);
+
+
+    if (!sku) {
+      throw new Error(
+        `Raspiv SKU not found for variant ${item.variant_id}`
+      );
+    }
+
+
+    return {
+      sku,
+      quantity:
+        Number(item.quantity),
+    };
+  });
+}

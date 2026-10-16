@@ -13,7 +13,8 @@ import shopsRoutes from "./modules/perfumes/shopsRoutes.js";
 import pricingRoutes from "./modules/pricing/pricingRoutes.js";
 import promoRoutes from "./modules/promo/promoRoutes.js";
 import websiteOrdersRoutes from "./modules/website/websiteOrdersRoutes.js";
-import ozonDeliveryRoutes from "./modules/delivery/ozon/ozonDeliveryRoutes.js";
+// import ozonDeliveryRoutes from "./modules/delivery/ozon/ozonDeliveryRoutes.js";
+import websiteDeliveryRoutes from "./modules/website/websiteDeliveryRoutes.js";
 
 
 import { saveRaspivSession, getRaspivSession } from "./temporary/raspiv.js"; // should be deleted 
@@ -81,9 +82,16 @@ await fastify.register(ozonRoutes, {
   prefix: "/ozon",
 });
 
-await fastify.register(ozonDeliveryRoutes, {
-  prefix: "/delivery/ozon",
-});
+fastify.register(
+  websiteDeliveryRoutes,
+  {
+    prefix: "/website/delivery",
+  }
+);
+
+// await fastify.register(ozonDeliveryRoutes, {
+//   prefix: "/delivery/ozon",
+// });
 
 fastify.register(pricingRoutes, {
   prefix: "/prices",
