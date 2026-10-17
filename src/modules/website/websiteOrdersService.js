@@ -2,11 +2,16 @@ import { randomUUID } from "node:crypto";
 
 import { supabase } from "../../lib/supabase.js";
 
+import {
+  calculateWebsiteOzonDelivery,
+} from "./websiteDeliveryService.js";
+
 
 export async function createWebsiteOrder(payload) {
 
   const {
     customer,
+    delivery,
     promoCode,
     items,
   } = payload;
@@ -252,13 +257,73 @@ export async function createWebsiteOrder(payload) {
 
 
   // --------------------------------------------------
-  // 9. Delivery
+  // 9. Calculate trusted delivery
   // --------------------------------------------------
 
-  // Ozon Delivery will be connected later.
-  // For now delivery is free / not calculated.
+  if (
+    !delivery ||
+    delivery.provider !== "ozon"
+  ) {
 
-  const deliveryPrice = 0;
+    const error = new Error(
+      "Unsupported delivery provider"
+    );
+
+    error.statusCode = 400;
+
+    throw error;
+  }
+
+
+  /*
+    IMPORTANT:
+
+    The browser only tells us which Ozon PVZ
+    the customer selected.
+
+    We do NOT trust the browser for:
+    - delivery price
+    - Ozon logistics cost
+    - insurance cost
+    - estimated delivery days
+    - cutoff
+    - order total
+
+    The subtotal above was calculated from
+    trusted Supabase prices.
+
+    We now send that trusted subtotal to
+    our delivery service.
+  */
+
+  const calculatedDelivery =
+    await calculateWebsiteOzonDelivery({
+      phone:
+        customer.phone.trim(),
+
+      deliveryPointId:
+        delivery.deliveryPointId,
+
+      declaredValue:
+        subtotal,
+    });
+
+
+  /*
+    Current La De Parfum model:
+
+    Ozon delivery is free for the customer.
+
+    The real Ozon logistics cost is still
+    stored in website_order_deliveries.
+  */
+
+  const deliveryPrice =
+    Number(
+      calculatedDelivery.customerDeliveryPrice ||
+      0
+    );
+
 
   const total =
     subtotal + deliveryPrice;
@@ -284,7 +349,8 @@ export async function createWebsiteOrder(payload) {
   } = await supabase
     .from("website_orders")
     .insert({
-      order_number: orderNumber,
+      order_number:
+        orderNumber,
 
       customer_name:
         customer.name.trim(),
@@ -293,16 +359,26 @@ export async function createWebsiteOrder(payload) {
         customer.phone.trim(),
 
       messenger:
-        customer.messenger?.trim() || null,
+        customer.messenger?.trim() ||
+        null,
 
       city:
         customer.city.trim(),
 
+      /*
+        Store the authoritative Ozon PVZ
+        address instead of trusting the
+        address text from the browser.
+      */
+
       address:
+        calculatedDelivery
+          .deliveryPointAddress ||
         customer.address.trim(),
 
       comment:
-        customer.comment?.trim() || null,
+        customer.comment?.trim() ||
+        null,
 
       promo_code:
         normalizedPromoCode,
@@ -345,7 +421,9 @@ export async function createWebsiteOrder(payload) {
 
   const orderItems =
     calculatedItems.map((item) => ({
-      order_id: order.id,
+      order_id:
+        order.id,
+
       ...item,
     }));
 
@@ -354,7 +432,9 @@ export async function createWebsiteOrder(payload) {
     error: orderItemsError,
   } = await supabase
     .from("website_order_items")
-    .insert(orderItems);
+    .insert(
+      orderItems
+    );
 
 
   if (orderItemsError) {
@@ -367,7 +447,10 @@ export async function createWebsiteOrder(payload) {
     await supabase
       .from("website_orders")
       .delete()
-      .eq("id", order.id);
+      .eq(
+        "id",
+        order.id
+      );
 
 
     throw new Error(
@@ -377,11 +460,106 @@ export async function createWebsiteOrder(payload) {
 
 
   // --------------------------------------------------
-  // 13. Return clean API result
+  // 13. Attach delivery to created order
+  // --------------------------------------------------
+
+  const {
+    error: orderDeliveryError,
+  } = await supabase
+    .from(
+      "website_order_deliveries"
+    )
+    .insert({
+      order_id:
+        order.id,
+
+      provider:
+        calculatedDelivery.provider,
+
+      delivery_type:
+        calculatedDelivery.deliveryType,
+
+      delivery_point_id:
+        calculatedDelivery.deliveryPointId,
+
+      delivery_point_name:
+        calculatedDelivery.deliveryPointName,
+
+      delivery_point_address:
+        calculatedDelivery.deliveryPointAddress,
+
+      estimated_delivery_days:
+        calculatedDelivery.estimatedDeliveryDays,
+
+      delivery_cost:
+        calculatedDelivery.deliveryCost,
+
+      insurance_cost:
+        calculatedDelivery.insuranceCost,
+
+      customer_delivery_price:
+        calculatedDelivery.customerDeliveryPrice,
+
+      cutoff_at:
+        calculatedDelivery.cutoffAt,
+
+      /*
+        These stay NULL until we actually
+        create the real Ozon Delivery order.
+      */
+
+      external_order_number:
+        null,
+
+      external_posting_number:
+        null,
+
+      status:
+        "calculated",
+    });
+
+
+  if (orderDeliveryError) {
+
+    console.error(
+      "Failed to insert website order delivery:",
+      orderDeliveryError
+    );
+
+
+    /*
+      Delete the parent order if delivery
+      persistence failed.
+
+      Because the related tables use
+      ON DELETE CASCADE, the order items
+      are removed with it.
+    */
+
+    await supabase
+      .from("website_orders")
+      .delete()
+      .eq(
+        "id",
+        order.id
+      );
+
+
+    throw new Error(
+      "Failed to create website order delivery"
+    );
+  }
+
+
+  // --------------------------------------------------
+  // 14. Return clean API result
   // --------------------------------------------------
 
   return {
-    id: Number(order.id),
+    id:
+      Number(
+        order.id
+      ),
 
     orderNumber:
       order.order_number,
@@ -390,13 +568,19 @@ export async function createWebsiteOrder(payload) {
       order.pricing_mode,
 
     subtotal:
-      Number(order.subtotal),
+      Number(
+        order.subtotal
+      ),
 
     deliveryPrice:
-      Number(order.delivery_price),
+      Number(
+        order.delivery_price
+      ),
 
     total:
-      Number(order.total),
+      Number(
+        order.total
+      ),
 
     status:
       order.status,
@@ -404,9 +588,11 @@ export async function createWebsiteOrder(payload) {
 
 }
 
+
 export async function getWebsiteOrderRaspivItems(
   orderId
 ) {
+
   // --------------------------------------------------
   // 1. Load Raspiv shop
   // --------------------------------------------------
@@ -420,15 +606,26 @@ export async function getWebsiteOrderRaspivItems(
       id,
       code
     `)
-    .eq("code", "raspiv")
-    .eq("is_active", true)
+    .eq(
+      "code",
+      "raspiv"
+    )
+    .eq(
+      "is_active",
+      true
+    )
     .single();
 
 
-  if (shopError || !raspivShop) {
+  if (
+    shopError ||
+    !raspivShop
+  ) {
+
     throw new Error(
       "Active Raspiv shop not found"
     );
+
   }
 
 
@@ -445,13 +642,18 @@ export async function getWebsiteOrderRaspivItems(
       variant_id,
       quantity
     `)
-    .eq("order_id", orderId);
+    .eq(
+      "order_id",
+      orderId
+    );
 
 
   if (orderItemsError) {
+
     throw new Error(
       "Failed to load website order items"
     );
+
   }
 
 
@@ -459,9 +661,11 @@ export async function getWebsiteOrderRaspivItems(
     !orderItems ||
     orderItems.length === 0
   ) {
+
     throw new Error(
       "Website order has no items"
     );
+
   }
 
 
@@ -472,7 +676,8 @@ export async function getWebsiteOrderRaspivItems(
   const variantIds = [
     ...new Set(
       orderItems.map(
-        (item) => item.variant_id
+        (item) =>
+          item.variant_id
       )
     ),
   ];
@@ -488,32 +693,45 @@ export async function getWebsiteOrderRaspivItems(
       perfume_id,
       volume_ml
     `)
-    .in("id", variantIds);
+    .in(
+      "id",
+      variantIds
+    );
 
 
   if (variantsError) {
+
     throw new Error(
       "Failed to load perfume variants"
     );
+
   }
 
 
   if (
     !variants ||
-    variants.length !== variantIds.length
+    variants.length !==
+      variantIds.length
   ) {
+
     throw new Error(
       "One or more perfume variants are missing"
     );
+
   }
 
 
-  const variantMap = new Map(
-    variants.map((variant) => [
-      Number(variant.id),
-      variant,
-    ])
-  );
+  const variantMap =
+    new Map(
+      variants.map(
+        (variant) => [
+          Number(
+            variant.id
+          ),
+          variant,
+        ]
+      )
+    );
 
 
   // --------------------------------------------------
@@ -523,7 +741,8 @@ export async function getWebsiteOrderRaspivItems(
   const perfumeIds = [
     ...new Set(
       variants.map(
-        (variant) => variant.perfume_id
+        (variant) =>
+          variant.perfume_id
       )
     ),
   ];
@@ -539,16 +758,30 @@ export async function getWebsiteOrderRaspivItems(
       volume_ml,
       sku
     `)
-    .eq("shop_id", raspivShop.id)
-    .eq("is_active", true)
-    .eq("is_archived", false)
-    .in("perfume_id", perfumeIds);
+    .eq(
+      "shop_id",
+      raspivShop.id
+    )
+    .eq(
+      "is_active",
+      true
+    )
+    .eq(
+      "is_archived",
+      false
+    )
+    .in(
+      "perfume_id",
+      perfumeIds
+    );
 
 
   if (shopProductsError) {
+
     throw new Error(
       "Failed to load Raspiv shop products"
     );
+
   }
 
 
@@ -556,44 +789,61 @@ export async function getWebsiteOrderRaspivItems(
   // 5. Create perfume + volume -> SKU lookup
   // --------------------------------------------------
 
-  const skuMap = new Map(
-    shopProducts.map((product) => [
-      `${product.perfume_id}:${product.volume_ml}`,
-      product.sku,
-    ])
-  );
+  const skuMap =
+    new Map(
+      shopProducts.map(
+        (product) => [
+          `${product.perfume_id}:${product.volume_ml}`,
+          product.sku,
+        ]
+      )
+    );
 
 
   // --------------------------------------------------
   // 6. Convert website items to Raspiv items
   // --------------------------------------------------
 
-  return orderItems.map((item) => {
-    const variant =
-      variantMap.get(
-        Number(item.variant_id)
-      );
+  return orderItems.map(
+    (item) => {
+
+      const variant =
+        variantMap.get(
+          Number(
+            item.variant_id
+          )
+        );
 
 
-    const key =
-      `${variant.perfume_id}:${variant.volume_ml}`;
+      const key =
+        `${variant.perfume_id}:${variant.volume_ml}`;
 
 
-    const sku =
-      skuMap.get(key);
+      const sku =
+        skuMap.get(
+          key
+        );
 
 
-    if (!sku) {
-      throw new Error(
-        `Raspiv SKU not found for variant ${item.variant_id}`
-      );
+      if (!sku) {
+
+        throw new Error(
+          `Raspiv SKU not found for variant ${item.variant_id}`
+        );
+
+      }
+
+
+      return {
+        sku,
+
+        quantity:
+          Number(
+            item.quantity
+          ),
+      };
+
     }
+  );
 
-
-    return {
-      sku,
-      quantity:
-        Number(item.quantity),
-    };
-  });
 }
