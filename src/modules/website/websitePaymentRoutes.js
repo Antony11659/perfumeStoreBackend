@@ -1,11 +1,96 @@
 import {
     verifyOzonPayNotification,
   } from "../payment/ozon/ozonPayService.js";
+
+import {
+  createWebsiteOrderPayment,
+  markWebsiteOrderPaidFromOzon,
+  } from "./websiteOrdersService.js";
   
   
   export default async function websitePaymentRoutes(
     fastify
   ) {
+
+      // --------------------------------------------------
+  // Create Ozon Pay payment for website order
+  // --------------------------------------------------
+
+  fastify.post(
+    "/website/orders/:orderId/payment",
+    async function (
+      request,
+      reply
+    ) {
+
+      const orderId =
+        Number(
+          request.params.orderId
+        );
+
+
+      if (
+        !Number.isInteger(orderId) ||
+        orderId < 1
+      ) {
+
+        return reply
+          .code(400)
+          .send({
+            success: false,
+            message:
+              "Invalid website order ID",
+          });
+
+      }
+
+
+      try {
+
+        const payment =
+          await createWebsiteOrderPayment(
+            orderId
+          );
+
+
+        return reply
+          .code(200)
+          .send({
+            success: true,
+            payment,
+          });
+
+
+      } catch (error) {
+
+        request.log.error(
+          {
+            errorMessage:
+              error?.message,
+
+            orderId,
+          },
+          "Failed to create website order payment"
+        );
+
+
+        return reply
+          .code(
+            error?.statusCode ||
+            500
+          )
+          .send({
+            success: false,
+
+            message:
+              error?.message ||
+              "Failed to create payment",
+          });
+
+      }
+
+    }
+  );
   
     /*
       Ozon Pay sends this request automatically
@@ -86,16 +171,13 @@ import {
         }
   
   
-        /*
-          3. Signature is valid.
-  
-          For this FIRST test we intentionally
-          do not update Supabase yet.
-  
-          We only want to prove that Ozon can
-          automatically reach this endpoint.
-        */
-  
+      /*
+        3. Signature is valid.
+
+        Now connect the verified Ozon payment
+        to our website order.
+      */
+
         request.log.info(
           {
             orderID:
@@ -130,7 +212,62 @@ import {
   
   
         /*
-          4. Tell Ozon we received it.
+          4. Update our website order.
+  
+          This function independently checks:
+          - Completed payment
+          - Payment operation
+          - RUB currency
+          - website order exists
+          - amount exactly matches order total
+        */
+  
+        try {
+  
+          const result =
+            await markWebsiteOrderPaidFromOzon(
+              notification
+            );
+  
+  
+          request.log.info(
+            {
+              paymentResult:
+                result,
+            },
+            "OZON PAY NOTIFICATION PROCESSED"
+          );
+  
+  
+        } catch (error) {
+  
+          request.log.error(
+            {
+              errorMessage:
+                error?.message,
+  
+              extOrderID:
+                notification?.extOrderID,
+            },
+            "Failed to process Ozon Pay notification"
+          );
+  
+  
+          return reply
+            .code(
+              error?.statusCode ||
+              500
+            )
+            .send({
+              success: false,
+            });
+  
+        }
+  
+  
+        /*
+          5. Tell Ozon that the notification
+          was successfully processed.
         */
   
         return reply

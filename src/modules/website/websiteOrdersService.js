@@ -6,6 +6,10 @@ import {
   calculateWebsiteOzonDelivery,
 } from "./websiteDeliveryService.js";
 
+import {
+  createOzonPayOrder,
+} from "../payment/ozon/ozonPayService.js";
+
 
 export async function createWebsiteOrder(payload) {
 
@@ -845,5 +849,472 @@ export async function getWebsiteOrderRaspivItems(
 
     }
   );
+
+}
+
+// --------------------------------------------------
+// Mark website order as paid from Ozon Pay
+// --------------------------------------------------
+
+export async function markWebsiteOrderPaidFromOzon(
+  notification
+) {
+
+  const {
+    extOrderID,
+    amount,
+    currencyCode,
+    status,
+    operationType,
+  } = notification;
+
+
+  // --------------------------------------------------
+  // 1. Validate payment event
+  // --------------------------------------------------
+
+  if (
+    operationType !== "Payment" ||
+    status !== "Completed"
+  ) {
+
+    return {
+      updated: false,
+      reason: "Payment is not completed",
+    };
+
+  }
+
+
+  // --------------------------------------------------
+  // 2. We only accept Russian rubles
+  // --------------------------------------------------
+
+  if (
+    String(currencyCode) !== "643"
+  ) {
+
+    const error =
+      new Error(
+        "Unexpected Ozon Pay currency"
+      );
+
+
+    error.statusCode = 400;
+
+
+    throw error;
+
+  }
+
+
+  // --------------------------------------------------
+  // 3. Ozon must tell us which website order
+  //    this payment belongs to
+  // --------------------------------------------------
+
+  if (
+    typeof extOrderID !== "string" ||
+    !extOrderID.trim()
+  ) {
+
+    const error =
+      new Error(
+        "Ozon Pay notification has no extOrderID"
+      );
+
+
+    error.statusCode = 400;
+
+
+    throw error;
+
+  }
+
+
+  // --------------------------------------------------
+  // 4. Find our website order
+  // --------------------------------------------------
+
+  const {
+    data: order,
+    error: orderError,
+  } = await supabase
+    .from("website_orders")
+    .select(`
+      id,
+      order_number,
+      total,
+      status
+    `)
+    .eq(
+      "order_number",
+      extOrderID.trim()
+    )
+    .maybeSingle();
+
+
+  if (orderError) {
+
+    throw new Error(
+      "Failed to load website order"
+    );
+
+  }
+
+
+  if (!order) {
+
+    const error =
+      new Error(
+        "Website order not found"
+      );
+
+
+    error.statusCode = 404;
+
+
+    throw error;
+
+  }
+
+
+  // --------------------------------------------------
+  // 5. Validate Ozon amount
+  //
+  // Ozon notification amount is in kopecks.
+  //
+  // Example:
+  // 380000 → 3800 ₽
+  // --------------------------------------------------
+
+  const ozonAmountKopecks =
+    Number(amount);
+
+
+  if (
+    !Number.isInteger(
+      ozonAmountKopecks
+    ) ||
+    ozonAmountKopecks < 0
+  ) {
+
+    const error =
+      new Error(
+        "Invalid Ozon Pay amount"
+      );
+
+
+    error.statusCode = 400;
+
+
+    throw error;
+
+  }
+
+
+  const orderTotalKopecks =
+    Math.round(
+      Number(order.total) * 100
+    );
+
+
+  if (
+    ozonAmountKopecks !==
+    orderTotalKopecks
+  ) {
+
+    const error =
+      new Error(
+        "Ozon Pay amount does not match website order total"
+      );
+
+
+    error.statusCode = 400;
+
+
+    throw error;
+
+  }
+
+
+  // --------------------------------------------------
+  // 6. Idempotency
+  //
+  // Ozon may send the same notification again.
+  // If we already marked this order as paid,
+  // there is nothing else to do.
+  // --------------------------------------------------
+
+  if (
+    order.status === "paid"
+  ) {
+
+    return {
+      updated: false,
+      alreadyPaid: true,
+      orderId:
+        Number(order.id),
+
+      orderNumber:
+        order.order_number,
+    };
+
+  }
+
+
+  // --------------------------------------------------
+  // 7. Update our authoritative order status
+  // --------------------------------------------------
+
+  const {
+    data: updatedOrder,
+    error: updateError,
+  } = await supabase
+    .from("website_orders")
+    .update({
+      status:
+        "paid",
+
+      updated_at:
+        new Date()
+          .toISOString(),
+    })
+    .eq(
+      "id",
+      order.id
+    )
+    .select(`
+      id,
+      order_number,
+      total,
+      status
+    `)
+    .single();
+
+
+  if (updateError) {
+
+    throw new Error(
+      "Failed to mark website order as paid"
+    );
+
+  }
+
+
+  // --------------------------------------------------
+  // 8. Return result
+  // --------------------------------------------------
+
+  return {
+    updated: true,
+
+    alreadyPaid: false,
+
+    orderId:
+      Number(
+        updatedOrder.id
+      ),
+
+    orderNumber:
+      updatedOrder.order_number,
+
+    total:
+      Number(
+        updatedOrder.total
+      ),
+
+    status:
+      updatedOrder.status,
+  };
+
+}
+
+// --------------------------------------------------
+// Create Ozon Pay payment for website order
+// --------------------------------------------------
+
+export async function createWebsiteOrderPayment(
+  orderId
+) {
+
+  // --------------------------------------------------
+  // 1. Load our trusted website order
+  // --------------------------------------------------
+
+  const {
+    data: order,
+    error: orderError,
+  } = await supabase
+    .from("website_orders")
+    .select(`
+      id,
+      order_number,
+      total,
+      status
+    `)
+    .eq(
+      "id",
+      orderId
+    )
+    .maybeSingle();
+
+
+  if (orderError) {
+
+    throw new Error(
+      "Failed to load website order"
+    );
+
+  }
+
+
+  if (!order) {
+
+    const error =
+      new Error(
+        "Website order not found"
+      );
+
+
+    error.statusCode = 404;
+
+
+    throw error;
+
+  }
+
+
+  // --------------------------------------------------
+  // 2. Do not create payment for paid order
+  // --------------------------------------------------
+
+  if (
+    order.status === "paid"
+  ) {
+
+    const error =
+      new Error(
+        "Website order is already paid"
+      );
+
+
+    error.statusCode = 400;
+
+
+    throw error;
+
+  }
+
+
+  // --------------------------------------------------
+  // 3. Convert trusted total to kopecks
+  //
+  // Supabase:
+  // 6300 ₽
+  //
+  // Ozon Pay:
+  // 630000 kopecks
+  // --------------------------------------------------
+
+  const total =
+    Number(
+      order.total
+    );
+
+
+  if (
+    !Number.isFinite(total) ||
+    total <= 0
+  ) {
+
+    throw new Error(
+      "Invalid website order total"
+    );
+
+  }
+
+
+  const amountKopecks =
+    Math.round(
+      total * 100
+    );
+
+
+  // --------------------------------------------------
+  // 4. Create Ozon Pay order
+  //
+  // IMPORTANT:
+  //
+  // extId is OUR order number.
+  //
+  // This is what allows the future webhook:
+  //
+  // extOrderID = LDP-...
+  //
+  // to find the correct Supabase order.
+  // --------------------------------------------------
+
+  const ozonResult =
+    await createOzonPayOrder({
+      extId:
+        order.order_number,
+
+      amountValue:
+        String(
+          amountKopecks
+        ),
+    });
+
+
+  const ozonOrder =
+    ozonResult?.order;
+
+
+  if (
+    !ozonOrder ||
+    !ozonOrder.id ||
+    !ozonOrder.payLink
+  ) {
+
+    throw new Error(
+      "Ozon Pay returned invalid order"
+    );
+
+  }
+
+
+  // --------------------------------------------------
+  // 5. Return only what website needs
+  // --------------------------------------------------
+
+  return {
+
+    orderId:
+      Number(
+        order.id
+      ),
+
+    orderNumber:
+      order.order_number,
+
+    amount:
+      total,
+
+    ozonPayOrderId:
+      ozonOrder.id,
+
+    ozonPayStatus:
+      ozonOrder.status,
+
+    payLink:
+      ozonOrder.payLink,
+
+    isTestMode:
+      Boolean(
+        ozonOrder.isTestMode
+      ),
+
+  };
 
 }
