@@ -15,6 +15,8 @@ import promoRoutes from "./modules/promo/promoRoutes.js";
 import websiteOrdersRoutes from "./modules/website/websiteOrdersRoutes.js";
 // import ozonDeliveryRoutes from "./modules/delivery/ozon/ozonDeliveryRoutes.js";
 import websiteDeliveryRoutes from "./modules/website/websiteDeliveryRoutes.js";
+import websitePaymentRoutes
+  from "./modules/website/websitePaymentRoutes.js";
 
 
 import { saveRaspivSession, getRaspivSession } from "./temporary/raspiv.js"; // should be deleted 
@@ -92,6 +94,13 @@ fastify.register(
 // await fastify.register(ozonDeliveryRoutes, {
 //   prefix: "/delivery/ozon",
 // });
+
+fastify.register(
+  websiteOrdersRoutes
+);
+fastify.register(
+  websitePaymentRoutes
+);
 
 fastify.register(pricingRoutes, {
   prefix: "/prices",
