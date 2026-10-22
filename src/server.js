@@ -13,7 +13,6 @@ import shopsRoutes from "./modules/perfumes/shopsRoutes.js";
 import pricingRoutes from "./modules/pricing/pricingRoutes.js";
 import promoRoutes from "./modules/promo/promoRoutes.js";
 import websiteOrdersRoutes from "./modules/website/websiteOrdersRoutes.js";
-// import ozonDeliveryRoutes from "./modules/delivery/ozon/ozonDeliveryRoutes.js";
 import websiteDeliveryRoutes from "./modules/website/websiteDeliveryRoutes.js";
 import websitePaymentRoutes
   from "./modules/website/websitePaymentRoutes.js";

@@ -172,7 +172,12 @@ import {
         } catch (error) {
   
           request.log.error(
-            error
+            {
+              message: error?.message,
+              cause: error?.cause,
+              stack: error?.stack,
+            },
+            "VERIFY PVZ FAILED"
           );
   
   
