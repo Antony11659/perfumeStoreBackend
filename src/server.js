@@ -14,8 +14,8 @@ import pricingRoutes from "./modules/pricing/pricingRoutes.js";
 import promoRoutes from "./modules/promo/promoRoutes.js";
 import websiteOrdersRoutes from "./modules/website/websiteOrdersRoutes.js";
 import websiteDeliveryRoutes from "./modules/website/websiteDeliveryRoutes.js";
-import websitePaymentRoutes
-  from "./modules/website/websitePaymentRoutes.js";
+import websitePaymentRoutes from "./modules/website/websitePaymentRoutes.js";
+import ozonSellerOAuthRoutes from "./modules/delivery/ozonSeller/ozonSellerOAuthRoutes.js";
 
 
 import { saveRaspivSession, getRaspivSession } from "./temporary/raspiv.js"; // should be deleted 
@@ -59,6 +59,10 @@ await fastify.register(swagger, {
         name: "Promo",
         description: "Promo code validation and activation",
       },
+      {
+        name: "Ozon Seller Logistics",
+        description: "Ozon Seller OAuth and customer pickup point discovery",
+      },
     ],
   },
 });
@@ -82,6 +86,13 @@ fastify.register(shopsRoutes, {
 await fastify.register(ozonRoutes, {
   prefix: "/ozon",
 });
+
+await fastify.register(
+  ozonSellerOAuthRoutes,
+  {
+    prefix: "/ozon-seller",
+  }
+);
 
 fastify.register(
   websiteDeliveryRoutes,
