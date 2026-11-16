@@ -214,7 +214,8 @@ export async function exchangeOzonSellerAuthorizationCode(
 // --------------------------------------------------
 
 export async function saveOzonSellerTokens(
-  tokens
+  tokens,
+  { signal } = {}
 ) {
   if (!tokens?.access_token) {
     throw new Error(
@@ -264,6 +265,7 @@ export async function saveOzonSellerTokens(
         }
       )
       .select()
+      .abortSignal(signal || AbortSignal.timeout(10000))
       .single();
 
   if (error) {
@@ -280,7 +282,7 @@ export async function saveOzonSellerTokens(
 // Load stored Seller OAuth
 // --------------------------------------------------
 
-export async function getStoredOzonSellerOAuth() {
+export async function getStoredOzonSellerOAuth({ signal } = {}) {
   const sellerId =
     process.env.OZON_SELLER_LOGISTICS_SELLER_ID;
 
@@ -298,6 +300,7 @@ export async function getStoredOzonSellerOAuth() {
         "seller_id",
         sellerId
       )
+      .abortSignal(signal || AbortSignal.timeout(10000))
       .maybeSingle();
 
   if (error) {
@@ -321,7 +324,8 @@ export async function getStoredOzonSellerOAuth() {
 // --------------------------------------------------
 
 export async function refreshOzonSellerAccessToken(
-  refreshToken
+  refreshToken,
+  { signal } = {}
 ) {
   const clientId =
     process.env.OZON_SELLER_LOGISTICS_CLIENT_ID;
@@ -345,6 +349,7 @@ export async function refreshOzonSellerAccessToken(
     await fetch(
       OZON_SELLER_TOKEN_URL,
       {
+        signal,
         method:
           "POST",
 
@@ -398,9 +403,9 @@ export async function refreshOzonSellerAccessToken(
 // Get valid access token
 // --------------------------------------------------
 
-export async function getOzonSellerAccessToken() {
+export async function getOzonSellerAccessToken({ signal } = {}) {
   const stored =
-    await getStoredOzonSellerOAuth();
+    await getStoredOzonSellerOAuth({ signal });
 
   let expiresAt = NaN;
 
@@ -426,7 +431,8 @@ export async function getOzonSellerAccessToken() {
 
   const refreshed =
     await refreshOzonSellerAccessToken(
-      stored.refresh_token
+      stored.refresh_token,
+      { signal }
     );
 
   /*
@@ -442,7 +448,8 @@ export async function getOzonSellerAccessToken() {
   }
 
   await saveOzonSellerTokens(
-    refreshed
+    refreshed,
+    { signal }
   );
 
   return refreshed.access_token;

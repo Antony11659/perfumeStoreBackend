@@ -33,7 +33,7 @@ export const OZON_DEFAULT_PARCEL_DIMENSIONS = {
  *
  * Ozon Delivery uses OAuth client_credentials.
  */
-export async function getOzonDeliveryAccessToken() {
+export async function getOzonDeliveryAccessToken({ signal } = {}) {
   const clientId =
     process.env.OZON_DELIVERY_CLIENT_ID;
 
@@ -81,6 +81,7 @@ export async function getOzonDeliveryAccessToken() {
 
       redirect:
         "follow",
+      signal,
     }
   );
 
@@ -126,10 +127,11 @@ export async function ozonDeliveryRequest(
   {
     method = "POST",
     body,
+    signal,
   } = {}
 ) {
   const token =
-    await getOzonDeliveryAccessToken();
+    await getOzonDeliveryAccessToken({ signal });
 
 
   const originalBody =
@@ -177,6 +179,7 @@ export async function ozonDeliveryRequest(
 
           redirect:
             "manual",
+          signal,
         }
       );
 
@@ -349,7 +352,8 @@ export async function getOzonDeliveryPoints(
 // --------------------------------------------------
 
 export async function getOzonDeliveryPointInfo(
-  deliveryPointIds
+  deliveryPointIds,
+  { signal, strictResponse = false } = {}
 ) {
   if (
     !Array.isArray(
@@ -376,6 +380,7 @@ export async function getOzonDeliveryPointInfo(
     await ozonDeliveryRequest(
       "/v1/delivery-point/info",
       {
+        signal,
         body: {
           delivery_point_ids:
             deliveryPointIds,
@@ -395,11 +400,14 @@ export async function getOzonDeliveryPointInfo(
   }
 
 
-  return Array.isArray(
-    data.delivery_points
-  )
-    ? data.delivery_points
-    : [];
+  if (!Array.isArray(data?.delivery_points)) {
+    if (strictResponse) {
+      throw new Error("Invalid Ozon delivery point info response");
+    }
+    return [];
+  }
+
+  return data.delivery_points;
 }
 
 
@@ -407,7 +415,7 @@ export async function getOzonDeliveryPointInfo(
 // Distance calculation
 // --------------------------------------------------
 
-function calculateDistanceMeters(
+export function calculateDistanceMeters(
   lat1,
   lon1,
   lat2,
@@ -461,7 +469,7 @@ function calculateDistanceMeters(
     Math.atan2(
       Math.sqrt(a),
       Math.sqrt(
-        1 - a
+        Math.max(0, 1 - a)
       )
     );
 

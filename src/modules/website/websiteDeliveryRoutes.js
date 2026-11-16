@@ -11,12 +11,15 @@ import {
   
   import {
     checkOzonDeliveryClient,
-    findOzonDeliveryPointAtLocation,
     checkOzonDeliveryPointAvailability,
     checkoutOzonDelivery,
   } from "../delivery/ozon/ozonDeliveryService.js";
   
   
+  import {
+    findOzonSellerDeliveryPointAtLocation,
+  } from "../delivery/ozonSeller/ozonSellerMapService.js";
+
   export default async function websiteDeliveryRoutes(
     fastify
   ) {
@@ -153,7 +156,7 @@ import {
   
   
           const point =
-            await findOzonDeliveryPointAtLocation(
+            await findOzonSellerDeliveryPointAtLocation(
               latitude,
               longitude
             );
@@ -173,16 +176,15 @@ import {
   
           request.log.error(
             {
-              message: error?.message,
-              cause: error?.cause,
-              stack: error?.stack,
+              message: "Ozon pickup point lookup failed",
+              statusCode: error?.statusCode || 502,
             },
             "VERIFY PVZ FAILED"
           );
   
   
           return reply
-            .code(500)
+            .code(error.statusCode || 502)
             .send({
               success: false,
   
