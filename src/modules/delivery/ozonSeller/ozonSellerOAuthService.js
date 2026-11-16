@@ -41,18 +41,6 @@ function getSellerIdFromAccessToken(accessToken) {
 
 
 function getExpiresAt(tokens) {
-  const expiresIn =
-    Number(tokens.expires_in);
-
-  if (
-    Number.isFinite(expiresIn) &&
-    expiresIn > 0
-  ) {
-    return new Date(
-      Date.now() + expiresIn * 1000
-    ).toISOString();
-  }
-
   const accessToken =
     tokens.access_token;
 
@@ -69,18 +57,24 @@ function getExpiresAt(tokens) {
           ).toString("utf8")
         );
 
-      if (payload.exp) {
-        return new Date(
-          Number(payload.exp) * 1000
-        ).toISOString();
+      const expiresAtMs =
+        payload?.exp * 1000;
+
+      if (
+        typeof payload?.exp === "number" &&
+        Number.isFinite(payload.exp) &&
+        Number.isFinite(expiresAtMs) &&
+        Number.isFinite(new Date(expiresAtMs).getTime())
+      ) {
+        return new Date(expiresAtMs).toISOString();
       }
     } catch {
-      // Ignore JWT parsing here.
+      // Missing or malformed JWT expiration is not safe to use.
     }
   }
 
   throw new Error(
-    "Unable to determine Ozon Seller token expiration"
+    "Unable to determine Ozon Seller token expiration: missing or invalid JWT exp"
   );
 }
 
@@ -207,7 +201,7 @@ export async function exchangeOzonSellerAuthorizationCode(
 
   if (!response.ok) {
     throw new Error(
-      `Ozon Seller OAuth token exchange failed (${response.status}): ${JSON.stringify(data)}`
+      `Ozon Seller OAuth token exchange failed (${response.status})`
     );
   }
 
@@ -392,7 +386,7 @@ export async function refreshOzonSellerAccessToken(
 
   if (!response.ok) {
     throw new Error(
-      `Ozon Seller token refresh failed (${response.status}): ${JSON.stringify(data)}`
+      `Ozon Seller token refresh failed (${response.status})`
     );
   }
 
@@ -408,10 +402,15 @@ export async function getOzonSellerAccessToken() {
   const stored =
     await getStoredOzonSellerOAuth();
 
-  const expiresAt =
-    new Date(
-      stored.expires_at
+  let expiresAt = NaN;
+
+  try {
+    expiresAt = new Date(
+      getExpiresAt({ access_token: stored.access_token })
     ).getTime();
+  } catch {
+    // Refresh tokens whose actual expiration cannot be verified.
+  }
 
   const refreshBeforeMs =
     5 * 60 * 1000;
