@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import { supabase } from "../../lib/supabase.js";
 
@@ -11,14 +11,100 @@ import {
 } from "../payment/ozon/ozonPayService.js";
 
 
-export async function createWebsiteOrder(payload) {
+function orderRequestError(statusCode, code, message) {
+  return Object.assign(new Error(message), { statusCode, code });
+}
+
+function normalizeWebsiteOrder(payload) {
+  const pointId = Number(payload.delivery.deliveryPointId);
+  if (!Number.isInteger(pointId) || pointId < 1) {
+    throw orderRequestError(400, undefined, "Invalid Ozon delivery point ID");
+  }
+
+  // Version 1: trim stored strings, collapse optional blanks to null, retain
+  // phone formatting and duplicate lines, and ignore item ordering.
+  return {
+    version: 1,
+    operation: "website-order",
+    customer: {
+      name: payload.customer.name.trim(),
+      phone: payload.customer.phone.trim(),
+      messenger: payload.customer.messenger?.trim() || null,
+      city: payload.customer.city.trim(),
+      address: payload.customer.address.trim(),
+      comment: payload.customer.comment?.trim() || null,
+    },
+    delivery: {
+      provider: payload.delivery.provider,
+      deliveryPointId: String(pointId),
+    },
+    promoCode: payload.promoCode?.trim().toUpperCase() || null,
+    items: payload.items.map(({ variantId, quantity }) => ({ variantId, quantity }))
+      .sort((a, b) => a.variantId - b.variantId || a.quantity - b.quantity),
+  };
+}
+
+async function persistWebsiteOrder(key, hash, prepared = null) {
+  let result;
+  try {
+    result = await supabase.rpc("persist_website_order_v1", {
+      p_key: key,
+      p_hash: hash,
+      p_prepared: prepared,
+    }).abortSignal(AbortSignal.timeout(10000));
+    if (result.error) throw result.error;
+  } catch {
+    // Transport failure/timeout may follow a successful commit. Never fall back
+    // to separate inserts or replace the key; resolve with the same key/body.
+    throw orderRequestError(503, "ORDER_PERSISTENCE_UNAVAILABLE",
+      "Order persistence is unavailable. Retry with the same idempotency key and request.");
+  }
+
+  const data = result?.data;
+  if (data?.outcome === "conflict") {
+    throw orderRequestError(409, "IDEMPOTENCY_KEY_CONFLICT",
+      "Idempotency key has already been used with a different request.");
+  }
+  if (data?.outcome === "in_progress") {
+    throw orderRequestError(409, "ORDER_IN_PROGRESS",
+      "Order creation is in progress. Retry with the same idempotency key and request.");
+  }
+  if (data?.outcome === "ready" && prepared === null) return null;
+  if (["created", "completed"].includes(data?.outcome) &&
+      data.response?.success === true && data.response.order &&
+      typeof data.response.order.orderNumber === "string" &&
+      Number.isFinite(data.response.order.total)) {
+    return data.response;
+  }
+  throw orderRequestError(503, "ORDER_PERSISTENCE_UNAVAILABLE",
+    "Order persistence is unavailable. Retry with the same idempotency key and request.");
+}
+
+export async function createWebsiteOrder(payload, idempotencyKey) {
+
+  if (idempotencyKey !== undefined && (
+    typeof idempotencyKey !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(idempotencyKey) ||
+    idempotencyKey === "00000000-0000-0000-0000-000000000000"
+  )) {
+    throw orderRequestError(400, "IDEMPOTENCY_KEY_INVALID",
+      "Idempotency-Key must be a single non-nil UUID.");
+  }
+
+  // Compatibility rollout: missing headers get one key per HTTP request.
+  // Only clients that retain/send their key receive retry deduplication.
+  const key = idempotencyKey?.toLowerCase() || randomUUID();
+  const normalized = normalizeWebsiteOrder(payload);
+  const hash = createHash("sha256").update(JSON.stringify(normalized)).digest("hex");
+  const completed = await persistWebsiteOrder(key, hash);
+  if (completed) return completed;
 
   const {
     customer,
     delivery,
     promoCode,
     items,
-  } = payload;
+  } = normalized;
 
 
   // --------------------------------------------------
@@ -343,255 +429,42 @@ export async function createWebsiteOrder(payload) {
       .toUpperCase()}`;
 
 
-  // --------------------------------------------------
-  // 11. Create website order
-  // --------------------------------------------------
-
-  const {
-    data: order,
-    error: orderError,
-  } = await supabase
-    .from("website_orders")
-    .insert({
-      order_number:
-        orderNumber,
-
-      customer_name:
-        customer.name.trim(),
-
-      phone:
-        customer.phone.trim(),
-
-      messenger:
-        customer.messenger?.trim() ||
-        null,
-
-      city:
-        customer.city.trim(),
-
-      /*
-        Store the authoritative Ozon PVZ
-        address instead of trusting the
-        address text from the browser.
-      */
-
-      address:
-        calculatedDelivery
-          .deliveryPointAddress ||
-        customer.address.trim(),
-
-      comment:
-        customer.comment?.trim() ||
-        null,
-
-      promo_code:
-        normalizedPromoCode,
-
-      pricing_mode:
-        pricingMode,
-
+  // Persist the trusted snapshot and original response in one database transaction.
+  return persistWebsiteOrder(key, hash, {
+    order: {
+      order_number: orderNumber,
+      customer_name: customer.name,
+      phone: customer.phone,
+      messenger: customer.messenger,
+      city: customer.city,
+      address: calculatedDelivery.deliveryPointAddress || customer.address,
+      comment: customer.comment,
+      promo_code: normalizedPromoCode,
+      pricing_mode: pricingMode,
       subtotal,
-
-      delivery_price:
-        deliveryPrice,
-
+      delivery_price: deliveryPrice,
       total,
-
-      status:
-        "new",
-    })
-    .select(`
-      id,
-      order_number,
-      pricing_mode,
-      subtotal,
-      delivery_price,
-      total,
-      status
-    `)
-    .single();
-
-
-  if (orderError) {
-    throw new Error(
-      "Failed to create website order"
-    );
-  }
-
-
-  // --------------------------------------------------
-  // 12. Attach items to created order
-  // --------------------------------------------------
-
-  const orderItems =
-    calculatedItems.map((item) => ({
-      order_id:
-        order.id,
-
-      ...item,
-    }));
-
-
-  const {
-    error: orderItemsError,
-  } = await supabase
-    .from("website_order_items")
-    .insert(
-      orderItems
-    );
-
-
-  if (orderItemsError) {
-
-    /*
-      We don't want to leave an empty order
-      if inserting its items failed.
-    */
-
-    await supabase
-      .from("website_orders")
-      .delete()
-      .eq(
-        "id",
-        order.id
-      );
-
-
-    throw new Error(
-      "Failed to create website order items"
-    );
-  }
-
-
-  // --------------------------------------------------
-  // 13. Attach delivery to created order
-  // --------------------------------------------------
-
-  const {
-    error: orderDeliveryError,
-  } = await supabase
-    .from(
-      "website_order_deliveries"
-    )
-    .insert({
-      order_id:
-        order.id,
-
-      provider:
-        calculatedDelivery.provider,
-
-      delivery_type:
-        calculatedDelivery.deliveryType,
-
-      delivery_point_id:
-        calculatedDelivery.deliveryPointId,
-
-      delivery_point_name:
-        calculatedDelivery.deliveryPointName,
-
-      delivery_point_address:
-        calculatedDelivery.deliveryPointAddress,
-
-      estimated_delivery_days:
-        calculatedDelivery.estimatedDeliveryDays,
-
-      delivery_cost:
-        calculatedDelivery.deliveryCost,
-
-      insurance_cost:
-        calculatedDelivery.insuranceCost,
-
-      customer_delivery_price:
-        calculatedDelivery.customerDeliveryPrice,
-
-      cutoff_at:
-        calculatedDelivery.cutoffAt,
-
-      /*
-        These stay NULL until we actually
-        create the real Ozon Delivery order.
-      */
-
-      external_order_number:
-        null,
-
-      external_posting_number:
-        null,
-
-      status:
-        "calculated",
-    });
-
-
-  if (orderDeliveryError) {
-
-    console.error(
-      "Failed to insert website order delivery:",
-      orderDeliveryError
-    );
-
-
-    /*
-      Delete the parent order if delivery
-      persistence failed.
-
-      Because the related tables use
-      ON DELETE CASCADE, the order items
-      are removed with it.
-    */
-
-    await supabase
-      .from("website_orders")
-      .delete()
-      .eq(
-        "id",
-        order.id
-      );
-
-
-    throw new Error(
-      "Failed to create website order delivery"
-    );
-  }
-
-
-  // --------------------------------------------------
-  // 14. Return clean API result
-  // --------------------------------------------------
-
-  return {
-    id:
-      Number(
-        order.id
-      ),
-
-    orderNumber:
-      order.order_number,
-
-    pricingMode:
-      order.pricing_mode,
-
-    subtotal:
-      Number(
-        order.subtotal
-      ),
-
-    deliveryPrice:
-      Number(
-        order.delivery_price
-      ),
-
-    total:
-      Number(
-        order.total
-      ),
-
-    status:
-      order.status,
-  };
+      status: "new",
+    },
+    items: calculatedItems,
+    delivery: {
+      provider: calculatedDelivery.provider,
+      delivery_type: calculatedDelivery.deliveryType,
+      delivery_point_id: calculatedDelivery.deliveryPointId,
+      delivery_point_name: calculatedDelivery.deliveryPointName,
+      delivery_point_address: calculatedDelivery.deliveryPointAddress,
+      estimated_delivery_days: calculatedDelivery.estimatedDeliveryDays,
+      delivery_cost: calculatedDelivery.deliveryCost,
+      insurance_cost: calculatedDelivery.insuranceCost,
+      customer_delivery_price: calculatedDelivery.customerDeliveryPrice,
+      cutoff_at: calculatedDelivery.cutoffAt,
+      external_order_number: null,
+      external_posting_number: null,
+      status: "calculated",
+    },
+  });
 
 }
-
 
 export async function getWebsiteOrderRaspivItems(
   orderId
