@@ -12,6 +12,10 @@ globalThis.fetch = async () => { throw new Error("External network access forbid
 const moduleUrl = (text) => `data:text/javascript;base64,${Buffer.from(text).toString("base64")}`;
 const root = new URL("../src/modules/", import.meta.url);
 const source = (path) => readFile(new URL(path, root), "utf8");
+const featureUrl = moduleUrl(`
+  const process = { env: { WEBSITE_OZON_PAY_ENABLED: "true" } };
+  ${await source("website/websitePaymentFeature.js")}
+`);
 let state;
 const clone = (value) => structuredClone(value);
 function reset() {
@@ -120,10 +124,19 @@ const serviceUrl = moduleUrl((await source("website/websiteOrdersService.js"))
   .replace('import { supabase } from "../../lib/supabase.js";', 'const supabase = globalThis.websiteOrdersTestSupabase;')
   .replace('"./websiteDeliveryService.js"', JSON.stringify(deliveryUrl))
   .replace('"../payment/ozon/ozonPayService.js"', JSON.stringify(paymentUrl)));
-const routesUrl = moduleUrl((await source("website/websiteOrdersRoutes.js"))
+const tokenUrl = moduleUrl(`
+  const process = { env: { WEBSITE_PAYMENT_TOKEN_SECRET:
+    "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f" } };
+  ${await source("website/websitePaymentAccessToken.js")}
+`);
+const tokenUtility = await import(tokenUrl);
+const routesCode = await source("website/websiteOrdersRoutes.js");
+const checkoutRoutesUrl = (feature, token) => moduleUrl(routesCode
+  .replace('"./websitePaymentFeature.js"', JSON.stringify(feature))
+  .replace('"./websitePaymentAccessToken.js"', JSON.stringify(token))
   .replace('"./websiteOrdersSchemas.js"', JSON.stringify(new URL("website/websiteOrdersSchemas.js", root).href))
   .replace('"./websiteOrdersService.js"', JSON.stringify(serviceUrl)));
-const routes = (await import(routesUrl)).default;
+const routes = (await import(checkoutRoutesUrl(featureUrl, tokenUrl))).default;
 const logs = [];
 const app = Fastify({ logger: { stream: { write(line) { logs.push(line); } } } });
 await app.register(cors, { origin: true, methods: ["GET", "POST", "OPTIONS"] });
@@ -142,6 +155,12 @@ function request(body = payload(), key = randomUUID(), url = "/website/orders") 
   return app.inject({ method: "POST", url, payload: clone(body), headers: key === undefined ? {} : { "Idempotency-Key": key } });
 }
 
+function checkoutSnapshot(response) {
+  const { paymentAccessToken, ...snapshot } = response.json();
+  tokenUtility.verifyWebsitePaymentAccessToken(paymentAccessToken, snapshot.order.id);
+  return snapshot;
+}
+
 await test("initial order uses trusted data and RPC only, with existing 201 response", async () => {
   reset();
   const p = payload();
@@ -149,7 +168,7 @@ await test("initial order uses trusted data and RPC only, with existing 201 resp
   p.items[0].unit_price = 1; p.delivery.delivery_cost = 1;
   const result = await request(p);
   assert.equal(result.statusCode, 201);
-  assert.deepEqual(result.json(), { success: true, order: {
+  assert.deepEqual(checkoutSnapshot(result), { success: true, order: {
     id: 1, orderNumber: state.orders[0].order.order_number, pricingMode: "website",
     subtotal: 400, deliveryPrice: 0, total: 400, status: "new",
   } });
@@ -175,10 +194,52 @@ await test("completed retry across both aliases returns original response withou
     state.ozonError = new Error("Must not revalidate");
     const again = await request(payload(), key.toUpperCase(), second);
     assert.equal(again.statusCode, 201);
-    assert.deepEqual(again.json(), result.json());
+    assert.deepEqual(checkoutSnapshot(again), checkoutSnapshot(result));
     assert.equal(state.reads.length, reads);
     assert.equal(state.ozon.length, ozon);
     assert.equal(state.orders.length, 1);
+  }
+});
+
+await test("payment off preserves actual checkout service and original replay across both aliases", async (t) => {
+  const offFeature = moduleUrl(`
+    const process = { env: {} };
+    ${await source("website/websitePaymentFeature.js")}
+  `);
+  const unusedToken = moduleUrl(`
+    export const requireWebsitePaymentTokenSecret = () => { throw Error("Unexpected token configuration read"); };
+    export const issueWebsitePaymentAccessToken = () => { throw Error("Unexpected token signing"); };
+  `);
+  const offRoutes = (await import(checkoutRoutesUrl(offFeature, unusedToken))).default;
+  const disabledApp = Fastify();
+  t.after(() => disabledApp.close());
+  await disabledApp.register(offRoutes);
+  await disabledApp.register(offRoutes, { prefix: "/website" });
+
+  for (const [first, second] of [["/orders", "/website/orders"], ["/website/orders", "/orders"]]) {
+    reset();
+    const key = randomUUID();
+    const send = (url) => disabledApp.inject({
+      method: "POST", url, payload: payload(), headers: { "Idempotency-Key": key },
+    });
+    const created = await send(first);
+    assert.equal(created.statusCode, 201);
+    assert.deepEqual(created.json(), {
+      success: true, order: {
+        id: 1, orderNumber: state.orders[0].order.order_number, pricingMode: "website",
+        subtotal: 400, deliveryPrice: 0, total: 400, status: "new",
+      },
+    });
+    const reads = state.reads.length;
+    const ozon = state.ozon.length;
+    state.ozonError = new Error("Must not revalidate");
+    const replay = await send(second);
+    assert.equal(replay.statusCode, 201);
+    assert.deepEqual(replay.json(), created.json());
+    assert.equal(state.orders.length, 1);
+    assert.equal(state.reads.length, reads);
+    assert.equal(state.ozon.length, ozon);
+    assert.equal(state.payments, 0);
   }
 });
 
@@ -198,7 +259,7 @@ await test("normalized equivalent payloads hash identically, retaining duplicate
   reordered.items = [{ quantity: "1", variantId: "2" }, { quantity: 2, variantId: 1 }, { variantId: 1, quantity: 2 }];
   const again = await request(reordered, key);
   assert.equal(again.statusCode, 201);
-  assert.deepEqual(again.json(), result.json());
+  assert.deepEqual(checkoutSnapshot(again), checkoutSnapshot(result));
   assert.equal(state.rpcCalls[0].p_hash, state.rpcCalls.at(-1).p_hash);
   reordered.items = [{ variantId: 1, quantity: 4 }, { variantId: 2, quantity: 1 }];
   assert.equal((await request(reordered, key)).statusCode, 409);
@@ -240,7 +301,7 @@ await test("concurrent finalization reports in progress, then replays a single c
   const result = await first;
   assert.equal(result.statusCode, 201);
   const retry = await request(payload(), key);
-  assert.deepEqual(retry.json(), result.json());
+  assert.deepEqual(checkoutSnapshot(retry), checkoutSnapshot(result));
   assert.equal(state.orders.length, 1);
 });
 
@@ -285,7 +346,7 @@ await test("lost reservation and finalization responses recover with the same ke
     const retry = await request(payload(), key);
     assert.equal(retry.statusCode, 201);
     if (phase === "finalize") {
-      assert.deepEqual(retry.json(), original);
+      assert.deepEqual(checkoutSnapshot(retry), original);
       assert.equal(state.reads.length, reads);
     }
     assert.equal(state.orders.length, 1);

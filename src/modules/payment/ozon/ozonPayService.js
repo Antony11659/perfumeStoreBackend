@@ -143,58 +143,40 @@ export async function createOzonPayOrder({
     };
   
   
-    const response =
-      await fetch(
-        "https://payapi.ozon.ru/v1/createOrder",
-        {
-          method: "POST",
-  
-          headers: {
-            "Content-Type":
-              "application/json",
-          },
-  
-          body:
-            JSON.stringify(
-              payload
-            ),
-        }
-      );
-  
-  
-    let data = null;
-  
-  
+    const signal = AbortSignal.timeout(5000);
+    const unavailable = (code, status) => {
+      console.error("Ozon Pay createOrder failed", { code, ...(status === undefined ? {} : { status }) });
+      return Object.assign(new Error("Ozon Pay creation could not be confirmed"), { code });
+    };
+
+    let response;
     try {
-  
-      data =
-        await response.json();
-  
+      response = await fetch("https://payapi.ozon.ru/v1/createOrder", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        redirect: "error",
+        signal,
+      });
     } catch {
-  
-      data = null;
-  
+      throw unavailable(signal.aborted ? "OZON_PAY_TIMEOUT" : "OZON_PAY_NETWORK_ERROR");
     }
-  
-  
+
     if (!response.ok) {
-  
-      console.error(
-        "Ozon Pay createOrder error:",
-        data
-      );
-  
-  
-      throw new Error(
-        data?.message ||
-        "Failed to create Ozon Pay order"
-      );
-  
+      throw unavailable("OZON_PAY_HTTP_ERROR", response.status);
     }
-  
-  
+
+    let data;
+    try {
+      data = await response.json();
+    } catch {
+      throw unavailable(signal.aborted ? "OZON_PAY_TIMEOUT" : "OZON_PAY_INVALID_RESPONSE", response.status);
+    }
+
+    if (!data || typeof data !== "object" || Array.isArray(data)) {
+      throw unavailable("OZON_PAY_INVALID_RESPONSE", response.status);
+    }
     return data;
-  
   }
 
   // --------------------------------------------------
@@ -202,7 +184,7 @@ export async function createOzonPayOrder({
 // --------------------------------------------------
 
 export function createOzonPayGetOrderStatusSign({
-    id,
+    id = "",
     extId = "",
   }) {
   
@@ -234,76 +216,95 @@ export function createOzonPayGetOrderStatusSign({
   // Ozon Pay: get order status
   // --------------------------------------------------
   
-  export async function getOzonPayOrderStatus({
-    id,
-  }) {
-  
-    const {
-      accessKey,
-    } = getOzonPayCredentials();
-  
-  
-    const requestSign =
-      createOzonPayGetOrderStatusSign({
-        id,
-      });
-  
-  
-    const response =
-      await fetch(
-        "https://payapi.ozon.ru/v1/getOrderStatus",
-        {
-          method: "POST",
-  
-          headers: {
-            "Content-Type":
-              "application/json",
-          },
-  
-          body:
-            JSON.stringify({
-              accessKey,
-              id,
-              requestSign,
-            }),
-        }
-      );
-  
-  
-    let data = null;
-  
-  
-    try {
-  
-      data =
-        await response.json();
-  
-    } catch {
-  
-      data = null;
-  
-    }
-  
-  
-    if (!response.ok) {
-  
-      console.error(
-        "Ozon Pay getOrderStatus error:",
-        data
-      );
-  
-  
-      throw new Error(
-        data?.message ||
-        "Failed to get Ozon Pay order status"
-      );
-  
-    }
-  
-  
-    return data;
-  
+function isOrderIdentifier(value) {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+export async function getOzonPayOrderStatus({ id, extId } = {}) {
+  const identifier = id === undefined ? { extId } : { id };
+  if (
+    (id !== undefined && extId !== undefined) ||
+    !isOrderIdentifier(id ?? extId)
+  ) {
+    throw new Error("Ozon Pay status lookup requires exactly one order identifier");
   }
+
+  const { accessKey } = getOzonPayCredentials();
+  const requestSign = createOzonPayGetOrderStatusSign(identifier);
+  const signal = AbortSignal.timeout(5000);
+  let response;
+  try {
+    response = await fetch("https://payapi.ozon.ru/v1/getOrderStatus", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ accessKey, ...identifier, requestSign }),
+      redirect: "error",
+      signal,
+    });
+  } catch {
+    if (signal.aborted) throw new Error("Ozon Pay status lookup timed out");
+    throw new Error("Ozon Pay status lookup failed");
+  }
+
+  if (!response.ok) {
+    throw new Error(`Ozon Pay status lookup failed (HTTP ${response.status})`);
+  }
+
+  let data;
+  try {
+    data = await response.json();
+  } catch {
+    if (signal.aborted) throw new Error("Ozon Pay status lookup timed out");
+    throw new Error("Invalid Ozon Pay status response");
+  }
+
+  if (data && Object.hasOwn(data, "code")) {
+    throw new Error("Ozon Pay status lookup returned a provider error");
+  }
+  if (
+    !isOrderIdentifier(data?.id) ||
+    !isOrderIdentifier(data.status) ||
+    (id !== undefined ? data.id !== id : data.extId !== extId)
+  ) {
+    throw new Error("Invalid Ozon Pay status response");
+  }
+
+  return data;
+}
+
+export function validateOzonPaySettlement(data, {
+  id, extId, amountKopecks, currencyCode, environment,
+}) {
+  if (!isOrderIdentifier(id) || !isOrderIdentifier(extId) ||
+      !Number.isSafeInteger(amountKopecks) || amountKopecks <= 0 ||
+      currencyCode !== "643" || !["production", "test"].includes(environment)) {
+    return { valid: false, reason: "INVALID_EXPECTATIONS" };
+  }
+
+  if (!data || typeof data !== "object" || Array.isArray(data) ||
+      Object.hasOwn(data, "code")) {
+    return { valid: false, reason: "INVALID_RESPONSE" };
+  }
+  if (data.id !== id || data.extId !== extId) {
+    return { valid: false, reason: "ORDER_MISMATCH" };
+  }
+  if (data.status !== "STATUS_PAID") {
+    return { valid: false, reason: "NOT_PAID" };
+  }
+  if (data.isTestMode !== (environment === "test")) {
+    return { valid: false, reason: "MODE_MISMATCH" };
+  }
+  if (data.originalAmount?.currencyCode !== currencyCode) {
+    return { valid: false, reason: "CURRENCY_MISMATCH" };
+  }
+  // Ozon documents a decimal string in minor units. Comparing to a validated
+  // safe integer's decimal representation avoids parsing or rounding provider data.
+  if (data.originalAmount.value !== String(amountKopecks)) {
+    return { valid: false, reason: "AMOUNT_MISMATCH" };
+  }
+
+  return { valid: true };
+}
 
   // --------------------------------------------------
 // Ozon Pay: notification signature
@@ -331,6 +332,7 @@ export function createOzonPayNotificationSign(
       orderID,
       transactionID,
       transactionUID,
+      transactionUid,
       extOrderID,
       amount,
       currencyCode,
@@ -360,13 +362,13 @@ export function createOzonPayNotificationSign(
     const transactionIdentifier =
       transactionID != null
         ? transactionID
-        : transactionUID;
+        : (transactionUID ?? transactionUid);
   
   
     const fingerprint =
       `${accessKey}|` +
       `${orderID || ""}|` +
-      `${transactionIdentifier || ""}|` +
+      `${transactionIdentifier ?? ""}|` +
       `${extOrderID || ""}|` +
       `${amount}|` +
       `${currencyCode}|` +
@@ -392,7 +394,7 @@ export function createOzonPayNotificationSign(
       notification?.requestSign;
   
   
-    if (!receivedSign) {
+    if (typeof receivedSign !== "string" || !/^[a-f0-9]{64}$/.test(receivedSign)) {
   
       return false;
   

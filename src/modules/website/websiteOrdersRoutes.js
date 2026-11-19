@@ -1,3 +1,10 @@
+import { websiteOzonPayEnabled } from "./websitePaymentFeature.js";
+
+import {
+  issueWebsitePaymentAccessToken,
+  requireWebsitePaymentTokenSecret,
+} from "./websitePaymentAccessToken.js";
+
 import {
     createWebsiteOrderSchema,
   } from "./websiteOrdersSchemas.js";
@@ -14,7 +21,26 @@ import {
     fastify.post(
       "/orders",
       {
-        schema: createWebsiteOrderSchema,
+        schema: {
+          ...createWebsiteOrderSchema,
+          description: createWebsiteOrderSchema.description +
+            " When backend payments are disabled, HTTP 201 contains only the Stage 2 response. " +
+            " When enabled, HTTP 201 also contains an order-scoped paymentAccessToken, freshly issued on replay. " +
+            " Missing or invalid payment-token signing configuration causes HTTP 503 only when enabled.",
+          response: {
+            ...createWebsiteOrderSchema.response,
+            201: {
+              ...createWebsiteOrderSchema.response[201],
+              properties: {
+                ...createWebsiteOrderSchema.response[201].properties,
+                paymentAccessToken: {
+                  type: "string",
+                  description: "Present only when backend payment initiation is enabled.",
+                },
+              },
+            },
+          },
+        },
       },
       async (request, reply) => {
   
@@ -24,16 +50,21 @@ import {
             (value, index) => index % 2 === 0 && value.toLowerCase() === "idempotency-key"
           ).length > 1;
 
+          const secret = websiteOzonPayEnabled ? requireWebsitePaymentTokenSecret() : undefined;
           const response =
             await createWebsiteOrder(
               request.body,
               duplicateKey ? [] : request.headers["idempotency-key"]
             );
-  
-  
+          if (!websiteOzonPayEnabled) return reply.code(201).send(response);
+
+          const orderId = response?.success === true ? response.order?.id : undefined;
+          const paymentAccessToken = issueWebsitePaymentAccessToken(orderId, secret);
+
           return reply
             .code(201)
-            .send(response);
+            .header("Cache-Control", "no-store")
+            .send({ ...response, paymentAccessToken });
   
   
         } catch (error) {

@@ -6,9 +6,9 @@ import {
   calculateWebsiteOzonDelivery,
 } from "./websiteDeliveryService.js";
 
-import {
-  createOzonPayOrder,
-} from "../payment/ozon/ozonPayService.js";
+import * as ozonPay from "../payment/ozon/ozonPayService.js";
+
+const { createOzonPayOrder } = ozonPay;
 
 
 function orderRequestError(statusCode, code, message) {
@@ -729,278 +729,158 @@ export async function getWebsiteOrderRaspivItems(
 // Mark website order as paid from Ozon Pay
 // --------------------------------------------------
 
-export async function markWebsiteOrderPaidFromOzon(
-  notification
-) {
+const settlementUnavailable = () => orderRequestError(503, undefined, "Payment settlement is unresolved");
+const settlementConflict = () => orderRequestError(409, undefined, "Payment does not match an eligible order");
 
-  const {
-    extOrderID,
-    amount,
-    currencyCode,
-    status,
-    operationType,
-  } = notification;
+async function readWebsitePayment(column, value) {
+  try {
+    // Preserve the exact PostgreSQL numeric value across the JSON boundary.
+    const { data, error } = await supabase.from("website_orders")
+      .select("id,order_number,total::text,status,payment_state,ozon_payment_id")
+      .eq(column, value)
+      .abortSignal(AbortSignal.timeout(10000))
+      .maybeSingle();
+    if (!error) return data;
+  } catch {
+    throw settlementUnavailable();
+  }
+  throw settlementUnavailable();
+}
 
+function websitePaymentKopecks(total) {
+  if (typeof total !== "string" && typeof total !== "number") return null;
+  const decimal = String(total);
+  const parts = /^(\d+)(?:\.(\d{1,2})0*)?$/.exec(decimal);
+  if (!parts || parts[0] !== decimal) return null;
+  const [, rubles, fraction = ""] = parts;
+  const kopecks = Number(rubles + fraction.padEnd(2, "0"));
+  return Number.isSafeInteger(kopecks) && kopecks > 0 ? kopecks : null;
+}
 
-  // --------------------------------------------------
-  // 1. Validate payment event
-  // --------------------------------------------------
+async function lookupWebsitePayment(order) {
+  try {
+    return await ozonPay.getOzonPayOrderStatus({ id: order.ozon_payment_id });
+  } catch {
+    throw settlementUnavailable();
+  }
+}
 
-  if (
-    operationType !== "Payment" ||
-    status !== "Completed"
-  ) {
+async function confirmVerifiedWebsitePayment(order, status, amountKopecks) {
+  const id = String(order.id);
+  const verification = ozonPay.validateOzonPaySettlement(status, {
+    id: order.ozon_payment_id,
+    extId: order.order_number,
+    amountKopecks,
+    currencyCode: "643",
+    environment: "production",
+  });
+  if (!verification.valid) throw settlementUnavailable();
 
-    return {
-      updated: false,
-      reason: "Payment is not completed",
-    };
-
+  function isConfirmed(row) {
+    return row?.status === "paid" && row.payment_state === "confirmed" &&
+      String(row.id) === id && row.order_number === order.order_number &&
+      row.ozon_payment_id === order.ozon_payment_id &&
+      websitePaymentKopecks(row.total) === amountKopecks;
   }
 
+  if (isConfirmed(order)) return { updated: false, alreadyPaid: true };
 
-  // --------------------------------------------------
-  // 2. We only accept Russian rubles
-  // --------------------------------------------------
-
-  if (
-    String(currencyCode) !== "643"
-  ) {
-
-    const error =
-      new Error(
-        "Unexpected Ozon Pay currency"
-      );
-
-
-    error.statusCode = 400;
-
-
-    throw error;
-
+  let result;
+  try {
+    result = await supabase.rpc("confirm_website_order_payment_v1", {
+      p_order_id: order.id,
+      p_ozon_payment_id: order.ozon_payment_id,
+      p_order_number: order.order_number,
+      p_amount_kopecks: amountKopecks,
+    }).abortSignal(AbortSignal.timeout(10000));
+  } catch {
+    // A thrown or timed-out response can follow a successful commit.
   }
 
-
-  // --------------------------------------------------
-  // 3. Ozon must tell us which website order
-  //    this payment belongs to
-  // --------------------------------------------------
-
-  if (
-    typeof extOrderID !== "string" ||
-    !extOrderID.trim()
-  ) {
-
-    const error =
-      new Error(
-        "Ozon Pay notification has no extOrderID"
-      );
-
-
-    error.statusCode = 400;
-
-
-    throw error;
-
+  if (result?.error === null && Array.isArray(result.data) &&
+      result.data.length === 1 && isConfirmed(result.data[0])) {
+    return { updated: true, alreadyPaid: false };
   }
 
+  const current = await readWebsitePayment("id", order.id);
+  if (isConfirmed(current)) return { updated: false, alreadyPaid: true };
+  if (result?.error === null && Array.isArray(result.data) && result.data.length === 0) {
+    throw settlementConflict();
+  }
+  throw settlementUnavailable();
+}
 
-  // --------------------------------------------------
-  // 4. Find our website order
-  // --------------------------------------------------
-
-  const {
-    data: order,
-    error: orderError,
-  } = await supabase
-    .from("website_orders")
-    .select(`
-      id,
-      order_number,
-      total,
-      status
-    `)
-    .eq(
-      "order_number",
-      extOrderID.trim()
-    )
-    .maybeSingle();
-
-
-  if (orderError) {
-
-    throw new Error(
-      "Failed to load website order"
-    );
-
+export async function markWebsiteOrderPaidFromOzon({ orderID, extOrderID, amount, currencyCode }) {
+  const order = await readWebsitePayment("order_number", extOrderID);
+  if (!order) throw orderRequestError(404, undefined, "Website order not found");
+  if (order.order_number !== extOrderID) throw settlementConflict();
+  if (order.status === "new" && (
+    order.payment_state === "reserved" || order.payment_state === "unknown" ||
+    order.payment_state === null
+  )) {
+    throw settlementUnavailable();
+  }
+  if (order.ozon_payment_id !== orderID ||
+      !((order.status === "new" && order.payment_state === "ready") ||
+        (order.status === "paid" && order.payment_state === "confirmed"))) {
+    throw settlementConflict();
   }
 
-
-  if (!order) {
-
-    const error =
-      new Error(
-        "Website order not found"
-      );
-
-
-    error.statusCode = 404;
-
-
-    throw error;
-
+  // A bigint serialized as an unsafe JSON number cannot reliably identify the row.
+  const id = String(order.id);
+  if (!/^[1-9][0-9]*$/.test(id) ||
+      (typeof order.id !== "string" && !Number.isSafeInteger(order.id))) {
+    throw settlementUnavailable();
   }
 
-
-  // --------------------------------------------------
-  // 5. Validate Ozon amount
-  //
-  // Ozon notification amount is in kopecks.
-  //
-  // Example:
-  // 380000 → 3800 ₽
-  // --------------------------------------------------
-
-  const ozonAmountKopecks =
-    Number(amount);
-
-
-  if (
-    !Number.isInteger(
-      ozonAmountKopecks
-    ) ||
-    ozonAmountKopecks < 0
-  ) {
-
-    const error =
-      new Error(
-        "Invalid Ozon Pay amount"
-      );
-
-
-    error.statusCode = 400;
-
-
-    throw error;
-
+  const amountKopecks = websitePaymentKopecks(order.total);
+  if (amountKopecks === null) throw settlementUnavailable();
+  if (currencyCode !== "643" || amount !== amountKopecks) {
+    throw orderRequestError(400, undefined, "Notification amount or currency does not match");
   }
 
+  return confirmVerifiedWebsitePayment(order, await lookupWebsitePayment(order), amountKopecks);
+}
 
-  const orderTotalKopecks =
-    Math.round(
-      Number(order.total) * 100
-    );
+export async function getWebsiteOrderPaymentStatus(orderId) {
+  const order = await readWebsitePayment("id", orderId);
+  if (!order) throw orderRequestError(404, undefined, "Website order not found");
+  if (order.id !== orderId && order.id !== String(orderId)) throw settlementUnavailable();
 
+  const hasReference = (value) => typeof value === "string" && value.trim().length > 0;
+  if (order.payment_state === "confirmed" || order.payment_state === "ready") {
+    const amountKopecks = websitePaymentKopecks(order.total);
+    if (!hasReference(order.ozon_payment_id) || !hasReference(order.order_number) ||
+        amountKopecks === null) throw settlementUnavailable();
 
-  if (
-    ozonAmountKopecks !==
-    orderTotalKopecks
-  ) {
+    if (order.payment_state === "confirmed" && order.status === "paid") return "paid";
+    if (order.payment_state !== "ready" || order.status !== "new") throw settlementConflict();
 
-    const error =
-      new Error(
-        "Ozon Pay amount does not match website order total"
-      );
+    const status = await lookupWebsitePayment(order);
+    if (status.status === "STATUS_PAID") {
+      await confirmVerifiedWebsitePayment(order, status, amountKopecks);
+      return "paid";
+    }
 
+    // An unconfirmed response can describe this payment only if its details match.
+    if (status.id !== order.ozon_payment_id || status.extId !== order.order_number ||
+        status.isTestMode !== false || status.originalAmount?.currencyCode !== "643" ||
+        status.originalAmount.value !== String(amountKopecks)) throw settlementUnavailable();
 
-    error.statusCode = 400;
-
-
-    throw error;
-
+    if (["STATUS_NEW", "STATUS_PAYMENT_PENDING", "STATUS_AUTHORIZED"].includes(status.status)) {
+      return "pending";
+    }
+    if (["STATUS_CANCELED", "STATUS_EXPIRED", "STATUS_REFUNDED"].includes(status.status)) {
+      return "unavailable";
+    }
+    throw settlementUnavailable();
   }
 
-
-  // --------------------------------------------------
-  // 6. Idempotency
-  //
-  // Ozon may send the same notification again.
-  // If we already marked this order as paid,
-  // there is nothing else to do.
-  // --------------------------------------------------
-
-  if (
-    order.status === "paid"
-  ) {
-
-    return {
-      updated: false,
-      alreadyPaid: true,
-      orderId:
-        Number(order.id),
-
-      orderNumber:
-        order.order_number,
-    };
-
-  }
-
-
-  // --------------------------------------------------
-  // 7. Update our authoritative order status
-  // --------------------------------------------------
-
-  const {
-    data: updatedOrder,
-    error: updateError,
-  } = await supabase
-    .from("website_orders")
-    .update({
-      status:
-        "paid",
-
-      updated_at:
-        new Date()
-          .toISOString(),
-    })
-    .eq(
-      "id",
-      order.id
-    )
-    .select(`
-      id,
-      order_number,
-      total,
-      status
-    `)
-    .single();
-
-
-  if (updateError) {
-
-    throw new Error(
-      "Failed to mark website order as paid"
-    );
-
-  }
-
-
-  // --------------------------------------------------
-  // 8. Return result
-  // --------------------------------------------------
-
-  return {
-    updated: true,
-
-    alreadyPaid: false,
-
-    orderId:
-      Number(
-        updatedOrder.id
-      ),
-
-    orderNumber:
-      updatedOrder.order_number,
-
-    total:
-      Number(
-        updatedOrder.total
-      ),
-
-    status:
-      updatedOrder.status,
-  };
-
+  if (order.status !== "new" || order.ozon_payment_id !== null) throw settlementConflict();
+  if (order.payment_state === null) return "not_started";
+  if (order.payment_state === "reserved") return "processing";
+  if (order.payment_state === "unknown") return "recovery_required";
+  throw settlementConflict();
 }
 
 // --------------------------------------------------
@@ -1010,6 +890,10 @@ export async function markWebsiteOrderPaidFromOzon(
 export async function createWebsiteOrderPayment(
   orderId
 ) {
+
+  if (!Number.isSafeInteger(orderId) || orderId < 1) {
+    throw orderRequestError(400, undefined, "Invalid website order ID");
+  }
 
   // --------------------------------------------------
   // 1. Load our trusted website order
@@ -1080,113 +964,144 @@ export async function createWebsiteOrderPayment(
   }
 
 
-  // --------------------------------------------------
-  // 3. Convert trusted total to kopecks
-  //
-  // Supabase:
-  // 6300 ₽
-  //
-  // Ozon Pay:
-  // 630000 kopecks
-  // --------------------------------------------------
-
-  const total =
-    Number(
-      order.total
-    );
-
-
-  if (
-    !Number.isFinite(total) ||
-    total <= 0
-  ) {
-
-    throw new Error(
-      "Invalid website order total"
-    );
-
+  const expectedMode = process.env.OZON_PAY_EXPECTED_MODE;
+  if (expectedMode !== "production" && expectedMode !== "test") {
+    throw orderRequestError(503, undefined, "Ozon Pay environment configuration is unavailable");
   }
 
+  const reservationUnavailable = () => orderRequestError(
+    503,
+    undefined,
+    "Website order payment reservation is temporarily unavailable"
+  );
 
-  const amountKopecks =
-    Math.round(
-      total * 100
-    );
+  let reservation;
+  try {
+    reservation = await supabase
+      .rpc("reserve_website_order_payment_v1", { p_order_id: orderId })
+      .abortSignal(AbortSignal.timeout(10000));
+  } catch {
+    throw reservationUnavailable();
+  }
 
+  if (reservation?.error !== null || !Array.isArray(reservation.data)) {
+    throw reservationUnavailable();
+  }
 
-  // --------------------------------------------------
-  // 4. Create Ozon Pay order
-  //
-  // IMPORTANT:
-  //
-  // extId is OUR order number.
-  //
-  // This is what allows the future webhook:
-  //
-  // extOrderID = LDP-...
-  //
-  // to find the correct Supabase order.
-  // --------------------------------------------------
+  if (reservation.data.length === 0) {
+    throw orderRequestError(409, undefined, "Website order payment reservation was denied");
+  }
 
-  const ozonResult =
-    await createOzonPayOrder({
-      extId:
-        order.order_number,
+  const matchesOrderId = (id) => id === orderId || id === String(orderId);
+  const [reservedOrder] = reservation.data;
+  if (
+    reservation.data.length !== 1 ||
+    !matchesOrderId(reservedOrder?.id) ||
+    reservedOrder.payment_state !== "reserved" ||
+    typeof reservedOrder.order_number !== "string" ||
+    !reservedOrder.order_number.trim()
+  ) {
+    throw reservationUnavailable();
+  }
 
-      amountValue:
-        String(
-          amountKopecks
-        ),
+  // Parse decimal digits directly so fractional kopecks cannot be rounded away.
+  function toKopecks(value) {
+    if (typeof value !== "number" && typeof value !== "string") return null;
+    const decimal = String(value);
+    const parts = /^(\d+)(?:\.(\d{1,2})0*)?$/.exec(decimal);
+    if (!parts || parts[0] !== decimal) return null;
+
+    const [, rubles, fraction = ""] = parts;
+    const kopecks = Number(rubles + fraction.padEnd(2, "0"));
+    return Number.isSafeInteger(kopecks) && kopecks > 0 ? kopecks : null;
+  }
+
+  const amountKopecks = toKopecks(reservedOrder.total);
+  if (amountKopecks === null) {
+    throw reservationUnavailable();
+  }
+
+  let ozonResult;
+  try {
+    ozonResult = await createOzonPayOrder({
+      extId: reservedOrder.order_number,
+      amountValue: String(amountKopecks),
     });
-
-
-  const ozonOrder =
-    ozonResult?.order;
-
-
-  if (
-    !ozonOrder ||
-    !ozonOrder.id ||
-    !ozonOrder.payLink
-  ) {
-
-    throw new Error(
-      "Ozon Pay returned invalid order"
-    );
-
+  } catch {
+    throw orderRequestError(503, undefined, "Ozon Pay creation could not be confirmed");
   }
 
+  const ozonOrder = ozonResult?.order;
+  const providerId = ozonOrder?.id;
+  const paymentLink = ozonOrder?.payLink;
+  if (
+    typeof providerId !== "string" || !providerId.trim() ||
+    typeof paymentLink !== "string" || !paymentLink.trim()
+  ) {
+    throw orderRequestError(502, undefined, "Ozon Pay returned invalid order");
+  }
 
-  // --------------------------------------------------
-  // 5. Return only what website needs
-  // --------------------------------------------------
+  const isTestMode = ozonOrder.isTestMode;
+  if (isTestMode !== (expectedMode === "test")) {
+    throw orderRequestError(502, undefined, "Ozon Pay returned an unexpected payment environment");
+  }
+
+  const saveUnavailable = () => orderRequestError(
+    503,
+    undefined,
+    "Website order payment persistence could not be confirmed"
+  );
+
+  let save;
+  try {
+    save = await supabase.rpc("save_website_order_payment_v1", {
+      p_order_id: orderId,
+      p_ozon_payment_id: providerId,
+      p_payment_link: paymentLink,
+    }).abortSignal(AbortSignal.timeout(10000));
+  } catch {
+    throw saveUnavailable();
+  }
+
+  if (save?.error !== null || !Array.isArray(save.data) || save.data.length !== 1) {
+    throw saveUnavailable();
+  }
+
+  const [savedOrder] = save.data;
+  if (
+    !matchesOrderId(savedOrder?.id) ||
+    savedOrder.payment_state !== "ready" ||
+    savedOrder.ozon_payment_id !== providerId ||
+    savedOrder.payment_link !== paymentLink ||
+    savedOrder.order_number !== reservedOrder.order_number ||
+    toKopecks(savedOrder.total) !== amountKopecks
+  ) {
+    throw saveUnavailable();
+  }
 
   return {
 
     orderId:
       Number(
-        order.id
+        reservedOrder.id
       ),
 
     orderNumber:
-      order.order_number,
+      reservedOrder.order_number,
 
     amount:
-      total,
+      Number(reservedOrder.total),
 
     ozonPayOrderId:
-      ozonOrder.id,
+      savedOrder.ozon_payment_id,
 
     ozonPayStatus:
       ozonOrder.status,
 
     payLink:
-      ozonOrder.payLink,
+      savedOrder.payment_link,
 
-    isTestMode:
-      Boolean(
-        ozonOrder.isTestMode
-      ),
+    isTestMode,
 
   };
 
