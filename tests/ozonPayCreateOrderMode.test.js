@@ -60,7 +60,7 @@ async function setup(t, { expectedMode, modeFields, enabled = true, alreadyPaid 
   t.after(() => assert.deepEqual(unexpected, []));
   let stored = { ...order, status: alreadyPaid ? "paid" : "new", payment_state: null };
   const api = globalThis.createOrderModeFixture;
-  api.env = { OZON_PAY_EXPECTED_MODE: expectedMode };
+  api.env = { OZON_PAY_EXPECTED_MODE: expectedMode, OZON_PAY_FISCALIZATION_NO_VAT: "VAT_NONE" };
   const guard = (check) => {
     try { check(); } catch (error) {
       unexpected.push(error.message);
@@ -68,6 +68,13 @@ async function setup(t, { expectedMode, modeFields, enabled = true, alreadyPaid 
     }
   };
   api.from = (table) => {
+    if (table === "website_order_items") {
+      return { select: () => ({ eq: () => ({ abortSignal: async () => ({
+        data: [{ quantity: 1, unit_price: "10.00", line_total: "10.00",
+          variant: { volume_ml: 10, perfume: { name: "Fixture perfume" } } }],
+        error: null,
+      }) }) }) };
+    }
     guard(() => assert.equal(table, "website_orders"));
     return {
       select: () => ({
@@ -84,7 +91,7 @@ async function setup(t, { expectedMode, modeFields, enabled = true, alreadyPaid 
       assert.ok(["id", "order_number"].includes(column));
       assert.equal(value, order[column]);
     });
-    return { data: { ...stored }, error: null };
+    return { data: { ...stored, phone: "+79990000000", delivery_price: 0 }, error: null };
   }
   api.rpc = (name, args) => ({
     async abortSignal() {
@@ -124,6 +131,8 @@ async function setup(t, { expectedMode, modeFields, enabled = true, alreadyPaid 
       assert.equal(options.method, "POST");
       assert.equal(request.extId, order.order_number);
       assert.equal(request.amount.value, "1000");
+      assert.equal(request.fiscalizationType, "FISCAL_TYPE_DOUBLE");
+      assert.equal(request.enableFiscalization, true);
     });
     return Response.json({ order: { id: providerId, payLink, status: "STATUS_NEW", ...modeFields },
       privateField: "provider-response-private" });

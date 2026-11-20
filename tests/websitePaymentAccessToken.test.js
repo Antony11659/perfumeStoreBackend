@@ -33,7 +33,7 @@ const provider = moduleUrl(`
   export const createOzonPayOrder = (...args) => globalThis.paymentAccessFixture.provider(...args);
   export function verifyOzonPayNotification() { throw new Error("Unexpected notification"); }
 `);
-const service = moduleUrl(`const process = { env: { OZON_PAY_EXPECTED_MODE: "production" } };\n` +
+const service = moduleUrl(`const process = { env: { OZON_PAY_EXPECTED_MODE: "production", OZON_PAY_FISCALIZATION_NO_VAT: "VAT_NONE" } };\n` +
   (await source("website/websiteOrdersService.js"))
   .replace('"../../lib/supabase.js"', JSON.stringify(database))
   .replace('"./websiteDeliveryService.js"', JSON.stringify(delivery))
@@ -94,10 +94,17 @@ async function setup(t, { status = "new", checkoutError, snapshot = stored } = {
     },
     database: {
       from(table) {
+        if (table === "website_order_items") {
+          return { select: () => ({ eq: () => ({ abortSignal: async () => ({
+            data: [{ quantity: 1, unit_price: "1200.00", line_total: "1200.00",
+              variant: { volume_ml: 10, perfume: { name: "Fixture perfume" } } }],
+            error: null,
+          }) }) }) };
+        }
         calls.push("read");
         assert.equal(table, "website_orders");
         return { select: () => ({ eq: () => ({
-          maybeSingle: async () => ({ data: { ...reserve, status }, error: null }),
+          maybeSingle: async () => ({ data: { ...reserve, status, phone: "+79990000000", delivery_price: 50 }, error: null }),
         }) }) };
       },
       rpc(name, args) {
@@ -116,7 +123,9 @@ async function setup(t, { status = "new", checkoutError, snapshot = stored } = {
     },
     provider(options) {
       calls.push("provider");
-      assert.deepEqual(options, { extId: stored.order.orderNumber, amountValue: "125000" });
+      assert.equal(options.extId, stored.order.orderNumber);
+      assert.equal(options.amountValue, "125000");
+      assert.equal(options.receipt.phone, "+79990000000");
       return { order: payment };
     },
   };

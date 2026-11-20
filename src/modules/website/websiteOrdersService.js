@@ -887,6 +887,67 @@ export async function getWebsiteOrderPaymentStatus(orderId) {
 // Create Ozon Pay payment for website order
 // --------------------------------------------------
 
+// Parse decimal digits directly so fractional kopecks cannot be rounded away.
+function toKopecks(value) {
+  if (typeof value !== "number" && typeof value !== "string") return null;
+  const decimal = String(value);
+  const parts = /^(\d+)(?:\.(\d{1,2})0*)?$/.exec(decimal);
+  if (!parts || parts[0] !== decimal) return null;
+
+  const [, rubles, fraction = ""] = parts;
+  const kopecks = Number(rubles + fraction.padEnd(2, "0"));
+  return Number.isSafeInteger(kopecks) ? kopecks : null;
+}
+
+
+
+async function loadWebsitePaymentReceipt(order, vat) {
+  const unavailable = () => orderRequestError(503, undefined, "Website order receipt data is unavailable");
+  const phone = typeof order.phone === "string" ? order.phone.trim() : "";
+  const total = toKopecks(order.total);
+  const delivery = toKopecks(order.delivery_price);
+  if (!phone || !total || delivery === null) throw unavailable();
+
+  const { data, error } = await supabase
+    .from("website_order_items")
+    .select("quantity, unit_price, line_total, variant:perfume_variants(volume_ml, perfume:perfumes(name))")
+    .eq("order_id", order.id)
+    .abortSignal(AbortSignal.timeout(10000));
+  if (error || !Array.isArray(data) || !data.length) throw unavailable();
+
+  let sum = BigInt(delivery);
+  const items = data.map(({ quantity, unit_price, line_total, variant }) => {
+    const catalogName = variant?.perfume?.name;
+    const name = typeof catalogName === "string" ? catalogName.trim() : "";
+    const volume = Number(variant?.volume_ml);
+    const unitPrice = toKopecks(unit_price);
+    const lineTotal = toKopecks(line_total);
+    if (!name || !Number.isFinite(volume) || volume <= 0 || !unitPrice ||
+        !Number.isSafeInteger(quantity) || quantity < 1 || lineTotal === null ||
+        BigInt(unitPrice) * BigInt(quantity) !== BigInt(lineTotal)) {
+      throw unavailable();
+    }
+    sum += BigInt(lineTotal);
+    return {
+      name: `${name}, ${volume} мл`,
+      quantity,
+      price: { currencyCode: "643", value: String(unitPrice) },
+      type: "TYPE_PRODUCT",
+      vat,
+    };
+  });
+  if (sum !== BigInt(total)) throw unavailable();
+  if (delivery > 0) {
+    items.push({
+      name: "Доставка",
+      quantity: 1,
+      price: { currencyCode: "643", value: String(delivery) },
+      vat,
+    });
+  }
+  return { phone, items, total };
+}
+
 export async function createWebsiteOrderPayment(
   orderId
 ) {
@@ -899,6 +960,7 @@ export async function createWebsiteOrderPayment(
   // 1. Load our trusted website order
   // --------------------------------------------------
 
+  const fiscalizationVat = process.env.OZON_PAY_FISCALIZATION_NO_VAT;
   const {
     data: order,
     error: orderError,
@@ -908,7 +970,9 @@ export async function createWebsiteOrderPayment(
       id,
       order_number,
       total,
-      status
+      status,
+      phone,
+      delivery_price
     `)
     .eq(
       "id",
@@ -969,6 +1033,11 @@ export async function createWebsiteOrderPayment(
     throw orderRequestError(503, undefined, "Ozon Pay environment configuration is unavailable");
   }
 
+  if (fiscalizationVat !== "VAT_NONE") {
+    throw orderRequestError(503, undefined, "Ozon Pay fiscalization configuration is unavailable");
+  }
+  const receipt = await loadWebsitePaymentReceipt(order, fiscalizationVat);
+
   const reservationUnavailable = () => orderRequestError(
     503,
     undefined,
@@ -1004,20 +1073,8 @@ export async function createWebsiteOrderPayment(
     throw reservationUnavailable();
   }
 
-  // Parse decimal digits directly so fractional kopecks cannot be rounded away.
-  function toKopecks(value) {
-    if (typeof value !== "number" && typeof value !== "string") return null;
-    const decimal = String(value);
-    const parts = /^(\d+)(?:\.(\d{1,2})0*)?$/.exec(decimal);
-    if (!parts || parts[0] !== decimal) return null;
-
-    const [, rubles, fraction = ""] = parts;
-    const kopecks = Number(rubles + fraction.padEnd(2, "0"));
-    return Number.isSafeInteger(kopecks) && kopecks > 0 ? kopecks : null;
-  }
-
   const amountKopecks = toKopecks(reservedOrder.total);
-  if (amountKopecks === null) {
+  if (amountKopecks !== receipt.total) {
     throw reservationUnavailable();
   }
 
@@ -1026,6 +1083,7 @@ export async function createWebsiteOrderPayment(
     ozonResult = await createOzonPayOrder({
       extId: reservedOrder.order_number,
       amountValue: String(amountKopecks),
+      receipt,
     });
   } catch {
     throw orderRequestError(503, undefined, "Ozon Pay creation could not be confirmed");

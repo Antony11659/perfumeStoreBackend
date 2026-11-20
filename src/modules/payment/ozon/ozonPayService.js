@@ -71,6 +71,7 @@ export function createOzonPayCreateOrderSign({
 export async function createOzonPayOrder({
     extId,
     amountValue,
+    receipt,
   }) {
   
     const {
@@ -86,7 +87,7 @@ export async function createOzonPayOrder({
   
   
     const fiscalizationType =
-      "FISCAL_TYPE_SINGLE";
+      receipt ? "FISCAL_TYPE_DOUBLE" : "FISCAL_TYPE_SINGLE";
   
   
     const paymentAlgorithm =
@@ -127,10 +128,11 @@ export async function createOzonPayOrder({
       paymentAlgorithm,
   
       mode:
-        "MODE_SHORTENED",
+        receipt ? "MODE_FULL" : "MODE_SHORTENED",
   
       enableFiscalization:
-        false,
+        Boolean(receipt),
+      ...(receipt && { fiscalizationPhone: receipt.phone, items: receipt.items }),
   
       successUrl:
         "https://ladeparfume.ru/payment-success",

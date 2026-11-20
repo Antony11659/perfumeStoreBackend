@@ -40,7 +40,7 @@ const delivery = moduleUrl(`
     throw new Error("Delivery must not run during payment creation");
   }
 `);
-const service = moduleUrl(`const process = { env: { OZON_PAY_EXPECTED_MODE: "test" } };\n` +
+const service = moduleUrl(`const process = { env: { OZON_PAY_EXPECTED_MODE: "test", OZON_PAY_FISCALIZATION_NO_VAT: "VAT_NONE" } };\n` +
   (await source("website/websiteOrdersService.js"))
   .replace('"../../lib/supabase.js"', JSON.stringify(mockDatabase))
   .replace('"./websiteDeliveryService.js"', JSON.stringify(delivery))
@@ -61,10 +61,17 @@ async function setup(t, { status = "new", outcomes = [] } = {}) {
   const rpcCalls = [];
   const providerCalls = [];
   const events = [];
-  // The legacy read deliberately differs from the authoritative reservation.
-  const legacyOrder = { id: orderId, order_number: "LDP-LEGACY-READ", total: "999.99", status };
+  // The initial order reference differs from the authoritative reservation.
+  const legacyOrder = { id: orderId, order_number: "LDP-LEGACY-READ", total: reservedOrder.total, status, phone: "+79990000000", delivery_price: 0 };
   globalThis.websitePaymentDecisionDatabase = {
     from(table) {
+      if (table === "website_order_items") {
+        return { select: () => ({ eq: () => ({ abortSignal: async () => ({
+          data: [{ quantity: 1, unit_price: "1250.45", line_total: "1250.45",
+            variant: { volume_ml: 10, perfume: { name: "Fixture perfume" } } }],
+          error: null,
+        }) }) }) };
+      }
       assert.equal(table, "website_orders");
       return {
         select() {

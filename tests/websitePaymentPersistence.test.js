@@ -39,7 +39,7 @@ const payment = moduleUrl(`
   const fetch = (...args) => globalThis.websitePaymentPersistenceFetch(...args);
   ${await source("payment/ozon/ozonPayService.js")}
 `);
-const service = moduleUrl(`const process = { env: { OZON_PAY_EXPECTED_MODE: "test" } };\n` +
+const service = moduleUrl(`const process = { env: { OZON_PAY_EXPECTED_MODE: "test", OZON_PAY_FISCALIZATION_NO_VAT: "VAT_NONE" } };\n` +
   (await source("website/websiteOrdersService.js"))
   .replace('"../../lib/supabase.js"', JSON.stringify(database))
   .replace('"./websiteDeliveryService.js"', JSON.stringify(delivery))
@@ -61,11 +61,18 @@ async function setup(t, { status = "new", save = () => result(saved), ozonOrder 
   let claimed = false;
   globalThis.websitePaymentPersistenceDatabase = {
     from(table) {
+      if (table === "website_order_items") {
+        return { select: () => ({ eq: () => ({ abortSignal: async () => ({
+          data: [{ quantity: 1, unit_price: "1250.45", line_total: "1250.45",
+            variant: { volume_ml: 10, perfume: { name: "Fixture perfume" } } }],
+          error: null,
+        }) }) }) };
+      }
       assert.equal(table, "website_orders");
       return {
         select: () => ({
           eq: () => ({
-            maybeSingle: async () => ({ data: { ...reserved, status }, error: null }),
+            maybeSingle: async () => ({ data: { ...reserved, status, phone: "+79990000000", delivery_price: 0 }, error: null }),
           }),
         }),
       };
