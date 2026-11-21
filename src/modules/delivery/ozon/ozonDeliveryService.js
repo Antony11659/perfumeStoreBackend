@@ -16,12 +16,14 @@ const OZON_DELIVERY_SCOPES = [
 export const OZON_WEBSITE_SHIPMENT_METHOD_ID =
   1020005033142790;
 
-export const OZON_DEFAULT_PARCEL_DIMENSIONS = {
-  weight_g: 50,
-  length_mm: 80,
-  width_mm: 60,
-  height_mm: 40,
-};
+export const OZON_DEFAULT_PARCEL_DIMENSIONS = Object.freeze({
+  weight_g: 60,
+  length_mm: 100,
+  width_mm: 50,
+  height_mm: 20,
+});
+
+export const OZON_STANDARD_PARCEL_DESCRIPTION = "Perfume";
 
 
 // --------------------------------------------------
@@ -128,16 +130,15 @@ export async function ozonDeliveryRequest(
     method = "POST",
     body,
     signal,
+    idempotencyKey,
   } = {}
 ) {
   const token =
     await getOzonDeliveryAccessToken({ signal });
 
 
-  const originalBody =
-    body === undefined
-      ? undefined
-      : JSON.stringify(body);
+  // Creation claims store the serialized body so replays are byte-identical.
+  const originalBody = idempotencyKey ? body : JSON.stringify(body);
 
 
   let url =
@@ -165,6 +166,9 @@ export async function ozonDeliveryRequest(
     if (cookie) {
       headers.Cookie =
         cookie;
+    }
+    if (idempotencyKey) {
+      headers["Idempotency-Key"] = idempotencyKey;
     }
 
 
@@ -222,11 +226,13 @@ export async function ozonDeliveryRequest(
     }
 
 
-    url =
-      new URL(
-        location,
-        url
-      ).toString();
+    const nextUrl = new URL(location, url);
+    if (nextUrl.origin !== OZON_DELIVERY_API_URL || nextUrl.username || nextUrl.password ||
+        (idempotencyKey && (nextUrl.pathname !== path || !/(?:^|,\s*)testcookie=/.test(setCookie || "")))) {
+      throw new Error("Unsafe Ozon Delivery redirect");
+    }
+    await response.body?.cancel();
+    url = nextUrl.toString();
   }
 
 

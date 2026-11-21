@@ -14,6 +14,7 @@ import pricingRoutes from "./modules/pricing/pricingRoutes.js";
 import promoRoutes from "./modules/promo/promoRoutes.js";
 import websiteOrdersRoutes from "./modules/website/websiteOrdersRoutes.js";
 import websiteDeliveryRoutes from "./modules/website/websiteDeliveryRoutes.js";
+import websiteDeliveryCreationRoutes from "./modules/website/websiteDeliveryCreationRoutes.js";
 import websitePaymentRoutes from "./modules/website/websitePaymentRoutes.js";
 import ozonSellerOAuthRoutes from "./modules/delivery/ozonSeller/ozonSellerOAuthRoutes.js";
 
@@ -100,6 +101,8 @@ fastify.register(
     prefix: "/website/delivery",
   }
 );
+
+fastify.register(websiteDeliveryCreationRoutes);
 
 // await fastify.register(ozonDeliveryRoutes, {
 //   prefix: "/delivery/ozon",
