@@ -227,6 +227,22 @@ await test("manual creation claims, checks matching checkout inputs, and saves l
   assert.match(docs.responses[422].description, /standard parcel fit/);
 });
 
+for (const cutoff of [
+  "2099-01-01T12:00:00.123Z",
+  "2099-01-01T12:00:00.123456Z",
+  "2099-01-01T12:00:00Z",
+  "2099-01-01T15:00:00.123456+03:00",
+]) {
+  await test(`preserves cutoff ${cutoff} through claim, checkout, and create`, async (t) => {
+    const f = await setup(t, { deliveryFields: { cutoff_at: cutoff } });
+    const response = await f.request();
+    assert.equal(response.statusCode, 201, response.body);
+    assert.equal(JSON.parse(f.saved.creation_body).postings[0].cutoff_at, cutoff);
+    assert.equal(f.checked[0].postings[0].cutoff_at, cutoff);
+    assert.equal(JSON.parse(f.creates[0].body).postings[0].cutoff_at, cutoff);
+  });
+}
+
 for (const [label, options] of [
   ["unpaid order", { orderFields: { status: "new" } }],
   ["unconfirmed payment", { orderFields: { payment_state: "ready" } }],
@@ -268,7 +284,8 @@ await test("concurrent creation allows only one provider mutation", async (t) =>
 });
 
 await test("timeout preserves an unknown outcome and an explicit retry uses byte-identical body and UUID", async (t) => {
-  const f = await setup(t, { onCreate(payload, count) {
+  const cutoff = "2099-01-01T15:00:00.123456+03:00";
+  const f = await setup(t, { deliveryFields: { cutoff_at: cutoff }, onCreate(payload, count) {
     if (count === 1) throw new DOMException("Mock deadline", "TimeoutError");
     return success(payload);
   } });
@@ -281,6 +298,7 @@ await test("timeout preserves an unknown outcome and an explicit retry uses byte
   assert.equal(f.creates.length, 1);
   assert.equal((await f.request({ retry: true })).statusCode, 201);
   assert.deepEqual(f.creates[1], f.creates[0]);
+  assert.equal(JSON.parse(f.creates[1].body).postings[0].cutoff_at, cutoff);
   assert.equal(f.saved.parcel, originalParcel);
   assert.deepEqual(f.claimKeys, [f.saved.creation_key, f.saved.creation_key]);
 });

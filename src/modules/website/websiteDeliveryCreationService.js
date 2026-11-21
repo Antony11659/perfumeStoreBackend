@@ -81,7 +81,7 @@ async function prepareDeliveryBody(order, delivery) {
       shipment_method_id: OZON_WEBSITE_SHIPMENT_METHOD_ID,
       description: OZON_STANDARD_PARCEL_DESCRIPTION,
       declared_value: { amount: `${subtotal / 100n}.${String(subtotal % 100n).padStart(2, "0")}`, currency_code: "RUB" },
-      cutoff_at: new Date(delivery.cutoff_at).toISOString(),
+      cutoff_at: delivery.cutoff_at,
       dimensions: OZON_DEFAULT_PARCEL_DIMENSIONS,
     }],
   };
