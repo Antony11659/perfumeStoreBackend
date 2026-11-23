@@ -21,6 +21,61 @@ const unavailable = () => deliveryError(503, "DELIVERY_UNAVAILABLE", "Shipment s
 const blocked = (message) => deliveryError(422, "FULFILLMENT_BLOCKED", message);
 const conflict = () => deliveryError(409, "SHIPMENT_CONFLICT", "Shipment already exists or creation is in progress. Reconcile unresolved attempts before proceeding.");
 
+async function logOzonFailure(operation, diagnostics, error) {
+  const { response, redirectReason, phase, sensitiveValues } = diagnostics;
+  const transportCode = error?.cause?.code ?? error?.code;
+  let category = diagnostics.category ?? "unexpected_internal_error";
+  if (redirectReason) category = "redirect_rejection";
+  else if (error?.name === "TimeoutError" ||
+      ["ETIMEDOUT", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT"].includes(transportCode)) {
+    category = "network_timeout";
+  } else if (transportCode === "ECONNRESET") category = "connection_reset";
+  else if (["UND_ERR_SOCKET", "ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "EPIPE"].includes(transportCode)) {
+    category = "network_error";
+  }
+  else if (phase === "oauth") category = "oauth_failure";
+  else if (response && !response.ok) category = "ozon_http_error";
+  else if (response && error instanceof SyntaxError) category = "invalid_provider_response";
+
+  const entry = {
+    event: "ozon_delivery_request_failed",
+    operation,
+    category,
+    upstreamPath: phase === "oauth" ? "/oauth/token" : `/v1/order/${operation}`,
+  };
+  if (response) entry.upstreamStatus = response.status;
+  if (phase === "oauth") entry.phase = phase;
+  if (redirectReason) entry.redirectReason = redirectReason;
+
+  const isSensitive = (value) => sensitiveValues.some((secret) => {
+    if (typeof secret !== "string") return false;
+    const normalized = value.toLowerCase();
+    return secret.toLowerCase() === normalized ||
+      (normalized.length >= 16 && secret.toLowerCase().includes(normalized));
+  });
+  const traceId = response?.headers.get("x-o3-trace-id") ?? response?.headers.get("x-trace-id");
+  if (traceId && /^(?:[a-f0-9]{16}|[a-f0-9]{32})$/i.test(traceId) && !isSensitive(traceId)) {
+    entry.ozonTraceId = traceId;
+  }
+
+  let code = diagnostics.providerError?.code;
+  if (response && !response.ok && !redirectReason) {
+    try {
+      const body = await response.json();
+      code = body?.error?.code ?? body?.code ?? body?.error_code ?? body?.error;
+    } catch {
+      // Keep the HTTP diagnostics when the error body is unavailable or malformed.
+    }
+  }
+  if ((typeof code === "number" || typeof code === "string") &&
+      (/^[0-9]{1,6}(?![\s\S])/.test(String(code)) ||
+        ["invalid_client", "invalid_grant", "invalid_request", "invalid_scope", "unauthorized_client",
+          "unsupported_grant_type"].includes(code)) && !isSensitive(String(code))) {
+    entry.ozonErrorCode = code;
+  }
+  console.error(entry);
+}
+
 function decimalKopecks(value) {
   const match = typeof value === "string" && /^(\d+)(?:\.(\d{1,2})0*)?$/.exec(value);
   if (!match || match[0] !== value) return null;
@@ -134,6 +189,11 @@ export async function createWebsiteDeliveryOrder(orderId, retry = false) {
   if (claim.length !== 1 || claim[0].creation_key !== key || claim[0].creation_body !== body) throw unavailable();
 
   const { posting_external_id, description, ...checkoutPosting } = posting;
+  const sensitiveValues = [
+    payload.recipient.full_name, payload.recipient.phone_number,
+    process.env.WEBSITE_OZON_DELIVERY_ADMIN_KEY, key, key?.replaceAll("-", ""),
+  ];
+  const checkoutDiagnostics = { sensitiveValues };
   try {
     const response = await ozonDeliveryRequest("/v1/order/checkout", {
       body: {
@@ -142,26 +202,39 @@ export async function createWebsiteDeliveryOrder(orderId, retry = false) {
         postings: [checkoutPosting],
       },
       signal: AbortSignal.timeout(10000),
+      diagnostics: checkoutDiagnostics,
     });
     if (!response.ok) throw unavailable();
-    const { results } = await response.json();
+    const { results } = (await response.json()) ?? {};
     const result = Array.isArray(results) && results.length === 1 && results[0];
-    if (result?.error) throw blocked("Ozon checkout rejected the saved shipment parameters");
+    if (result?.error) {
+      checkoutDiagnostics.category = "provider_rejection";
+      checkoutDiagnostics.providerError = result.error;
+      throw blocked("Ozon checkout rejected the saved shipment parameters");
+    }
     if (!result?.posting || typeof result.posting !== "object" || Array.isArray(result.posting) ||
-        (result.request_id !== undefined && result.request_id !== posting.request_id)) throw unavailable();
+        (result.request_id !== undefined && result.request_id !== posting.request_id)) {
+      checkoutDiagnostics.category = "invalid_provider_response";
+      throw unavailable();
+    }
     if (!futureCutoff(posting.cutoff_at)) throw blocked("The saved delivery cutoff expired during checkout");
   } catch (error) {
+    if (error?.code !== "FULFILLMENT_BLOCKED" || checkoutDiagnostics.providerError) {
+      await logOzonFailure("checkout", checkoutDiagnostics, error).catch(() => {});
+    }
     await recordOutcome(orderId, key, claim[0].previous_state === "unknown" ? "unknown" : "retryable", "CHECKOUT_FAILED");
     if (error?.code === "FULFILLMENT_BLOCKED") throw error;
     throw deliveryError(502, "CHECKOUT_FAILED", "Ozon shipment checkout could not be confirmed");
   }
 
   let identifiers;
+  const createDiagnostics = { sensitiveValues };
   try {
     const response = await ozonDeliveryRequest("/v1/order/create", {
       body,
       idempotencyKey: key,
       signal: AbortSignal.timeout(10000),
+      diagnostics: createDiagnostics,
     });
     if (!response.ok) throw unavailable();
     const result = await response.json();
@@ -170,10 +243,12 @@ export async function createWebsiteDeliveryOrder(orderId, retry = false) {
         !result.order_number.trim() || returnedPosting?.request_id !== posting.request_id ||
         returnedPosting.posting_external_id !== posting_external_id ||
         typeof returnedPosting.posting_number !== "string" || !returnedPosting.posting_number.trim()) {
+      createDiagnostics.category = "invalid_provider_response";
       throw unavailable();
     }
     identifiers = { external_order_number: result.order_number, external_posting_number: returnedPosting.posting_number };
-  } catch {
+  } catch (error) {
+    await logOzonFailure("create", createDiagnostics, error).catch(() => {});
     await recordOutcome(orderId, key, "unknown", "CREATE_OUTCOME_UNKNOWN");
     throw deliveryError(502, "CREATE_OUTCOME_UNKNOWN", "Ozon creation outcome is unknown. Reconcile before an explicit same-request retry.");
   }

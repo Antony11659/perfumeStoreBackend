@@ -85,7 +85,7 @@ function success(payload) {
 }
 
 async function setup(t, {
-  enabled = "true", orderFields = {}, deliveryFields = {}, onCheckout, onCreate, rejectSave, rejectClaim,
+  enabled = "true", orderFields = {}, deliveryFields = {}, onOAuth, onCheckout, onCreate, rejectSave, rejectClaim,
   approvedVariants = "42", items = [{ variant_id: "42", quantity: 1, unit_price: "150.20", line_total: "150.20" }],
 } = {}) {
   const order = {
@@ -165,7 +165,9 @@ async function setup(t, {
     const path = new URL(url).pathname;
     assert.ok(options.signal instanceof AbortSignal);
     const payload = JSON.parse(options.body);
-    if (url === "https://xapi.ozon.ru/oauth/token") return Response.json({ access_token: "fixture-bearer" });
+    if (url === "https://xapi.ozon.ru/oauth/token") {
+      return onOAuth?.() ?? Response.json({ access_token: "fixture-bearer" });
+    }
     assert.equal(new URL(url).origin, "https://api-delivery.ozon.ru");
     assert.equal(options.headers.Authorization, "Bearer fixture-bearer");
     if (path === "/v1/order/checkout") {
@@ -362,3 +364,91 @@ for (const [label, location, cookie] of [
     assert.equal(f.creates.length, 1);
   });
 }
+
+const traceId = "a0b1c2d3e4f567890123456789abcdef";
+
+for (const [label, options, expected] of [
+  ["checkout HTTP error", {
+    onCheckout: () => Response.json({ code: 9, message: "Synthetic recipient" }, {
+      status: 403, headers: { "x-o3-trace-id": traceId },
+    }),
+  }, { operation: "checkout", category: "ozon_http_error", upstreamStatus: 403, ozonErrorCode: 9, ozonTraceId: traceId }],
+  ["checkout provider rejection", {
+    onCheckout: () => Response.json({ results: [{ error: { code: 3 } }] }),
+  }, { operation: "checkout", category: "provider_rejection", upstreamStatus: 200, ozonErrorCode: 3 }],
+  ["OAuth failure", {
+    onOAuth: () => Response.json({ error: "invalid_client", error_description: "fixture-secret" }, { status: 401 }),
+  }, { operation: "checkout", category: "oauth_failure", upstreamStatus: 401, phase: "oauth", ozonErrorCode: "invalid_client" }],
+  ["create redirect rejection", {
+    onCreate: () => new Response(null, {
+      status: 307, headers: { location: "https://untrusted.example/?token=fixture-bearer", "set-cookie": "testcookie=fixture" },
+    }),
+  }, { operation: "create", category: "redirect_rejection", upstreamStatus: 307, redirectReason: "cross_origin" }],
+  ["create timeout", {
+    onCreate: () => { throw new DOMException("fixture-secret", "TimeoutError"); },
+  }, { operation: "create", category: "network_timeout" }],
+  ["connection reset", {
+    onCreate: () => { throw new TypeError("fixture-bearer", { cause: { code: "ECONNRESET" } }); },
+  }, { operation: "create", category: "connection_reset" }],
+  ["other network error", {
+    onCreate: () => { throw new TypeError("fetch failed", { cause: { code: "ECONNREFUSED" } }); },
+  }, { operation: "create", category: "network_error" }],
+  ["malformed provider JSON", {
+    onCreate: () => new Response("fixture-secret"),
+  }, { operation: "create", category: "invalid_provider_response", upstreamStatus: 200 }],
+  ["invalid provider shape", {
+    onCheckout: () => Response.json(null),
+  }, { operation: "checkout", category: "invalid_provider_response", upstreamStatus: 200 }],
+  ["unexpected internal error", {
+    onCreate: () => { throw new Error("fixture-operator-key"); },
+  }, { operation: "create", category: "unexpected_internal_error" }],
+]) {
+  await test(`logs a structured diagnostic for ${label}`, async (t) => {
+    const logger = t.mock.method(console, "error", () => {});
+    const f = await setup(t, options);
+    const response = await f.request();
+    const rejected = expected.category === "provider_rejection";
+    assert.equal(response.statusCode, rejected ? 422 : 502);
+    const creating = expected.operation === "create";
+    assert.equal(response.json().code, creating ? "CREATE_OUTCOME_UNKNOWN" : rejected ? "FULFILLMENT_BLOCKED" : "CHECKOUT_FAILED");
+    assert.equal(f.saved.creation_state, creating ? "unknown" : "retryable");
+    assert.equal(f.creates.length, creating ? 1 : 0);
+    assert.deepEqual(logger.mock.calls.map(({ arguments: args }) => args), [[{
+      event: "ozon_delivery_request_failed",
+      upstreamPath: expected.phase === "oauth" ? "/oauth/token" : `/v1/order/${expected.operation}`,
+      ...expected,
+    }]]);
+  });
+}
+
+await test("omits echoed credentials, recipient data, redirect query, and the creation key", async (t) => {
+  const logger = t.mock.method(console, "error", () => {});
+  const f = await setup(t, { onCreate(payload, count) {
+    if (count === 1) return new Response(null, {
+      status: 307,
+      headers: { location: `/v1/order/create?key=${f.saved.creation_key}`, "set-cookie": `testcookie=${traceId}` },
+    });
+    return Response.json({
+      code: f.saved.creation_key,
+      message: { payload, authorization: "Bearer fixture-bearer", secret: "fixture-secret", operator: "fixture-operator-key" },
+    }, { status: 500, headers: { "x-o3-trace-id": traceId } });
+  } });
+  assert.equal((await f.request()).json().code, "CREATE_OUTCOME_UNKNOWN");
+  assert.equal(f.creates.length, 2);
+  assert.deepEqual(logger.mock.calls.map(({ arguments: args }) => args), [[{
+    event: "ozon_delivery_request_failed",
+    operation: "create",
+    category: "ozon_http_error",
+    upstreamPath: "/v1/order/create",
+    upstreamStatus: 500,
+  }]]);
+});
+
+await test("a logging failure still persists the uncertain creation outcome", async (t) => {
+  const logger = t.mock.method(console, "error", () => { throw new Error("fixture logger unavailable"); });
+  const f = await setup(t, { onCreate: () => Response.json({}, { status: 502 }) });
+  assert.equal((await f.request()).json().code, "CREATE_OUTCOME_UNKNOWN");
+  assert.equal(f.saved.creation_state, "unknown");
+  assert.equal(f.creates.length, 1);
+  assert.equal(logger.mock.callCount(), 1);
+});

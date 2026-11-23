@@ -35,7 +35,7 @@ export const OZON_STANDARD_PARCEL_DESCRIPTION = "Perfume";
  *
  * Ozon Delivery uses OAuth client_credentials.
  */
-export async function getOzonDeliveryAccessToken({ signal } = {}) {
+export async function getOzonDeliveryAccessToken({ signal, diagnostics } = {}) {
   const clientId =
     process.env.OZON_DELIVERY_CLIENT_ID;
 
@@ -88,7 +88,10 @@ export async function getOzonDeliveryAccessToken({ signal } = {}) {
   );
 
 
+  if (diagnostics) diagnostics.response = response;
+
   if (!response.ok) {
+    if (diagnostics) throw new Error("Ozon Delivery OAuth failed");
     const body =
       await response.text();
 
@@ -131,10 +134,20 @@ export async function ozonDeliveryRequest(
     body,
     signal,
     idempotencyKey,
+    diagnostics,
   } = {}
 ) {
+  if (diagnostics) {
+    diagnostics.phase = "oauth";
+    diagnostics.sensitiveValues.push(process.env.OZON_DELIVERY_CLIENT_SECRET);
+  }
   const token =
-    await getOzonDeliveryAccessToken({ signal });
+    await getOzonDeliveryAccessToken({ signal, diagnostics });
+  if (diagnostics) {
+    diagnostics.phase = "delivery";
+    diagnostics.response = undefined;
+    diagnostics.sensitiveValues.push(token);
+  }
 
 
   // Creation claims store the serialized body so replays are byte-identical.
@@ -172,6 +185,7 @@ export async function ozonDeliveryRequest(
     }
 
 
+    if (diagnostics) diagnostics.response = undefined;
     const response =
       await fetch(
         url,
@@ -187,6 +201,8 @@ export async function ozonDeliveryRequest(
         }
       );
 
+
+    if (diagnostics) diagnostics.response = response;
 
     if (
       response.status !== 302 &&
@@ -219,16 +235,34 @@ export async function ozonDeliveryRequest(
     }
 
 
+    if (diagnostics && setCookie) {
+      for (const pair of cookie.split("; ")) {
+        diagnostics.sensitiveValues.push(pair.slice(pair.indexOf("=") + 1));
+      }
+    }
+
     if (!location) {
+      if (diagnostics) diagnostics.redirectReason = "missing_location";
       throw new Error(
         `Ozon Delivery returned ${response.status} without Location header`
       );
     }
 
 
-    const nextUrl = new URL(location, url);
-    if (nextUrl.origin !== OZON_DELIVERY_API_URL || nextUrl.username || nextUrl.password ||
-        (idempotencyKey && (nextUrl.pathname !== path || !/(?:^|,\s*)testcookie=/.test(setCookie || "")))) {
+    let nextUrl;
+    try {
+      nextUrl = new URL(location, url);
+    } catch (error) {
+      if (diagnostics) diagnostics.redirectReason = "invalid_location";
+      throw error;
+    }
+    let redirectReason;
+    if (nextUrl.origin !== OZON_DELIVERY_API_URL) redirectReason = "cross_origin";
+    else if (nextUrl.username || nextUrl.password) redirectReason = "url_credentials";
+    else if (idempotencyKey && nextUrl.pathname !== path) redirectReason = "path_changed";
+    else if (idempotencyKey && !/(?:^|,\s*)testcookie=/.test(setCookie || "")) redirectReason = "missing_testcookie";
+    if (redirectReason) {
+      if (diagnostics) diagnostics.redirectReason = redirectReason;
       throw new Error("Unsafe Ozon Delivery redirect");
     }
     await response.body?.cancel();
@@ -236,6 +270,7 @@ export async function ozonDeliveryRequest(
   }
 
 
+  if (diagnostics) diagnostics.redirectReason = "limit_exceeded";
   throw new Error(
     "Ozon Delivery redirect limit exceeded"
   );
