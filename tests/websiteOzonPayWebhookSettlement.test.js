@@ -22,10 +22,12 @@ const provider = moduleUrl(`
   const fetch = (...args) => globalThis.webhookFixture.fetch(...args);
   ${await source("payment/ozon/ozonPayService.js")}
 `);
-const service = moduleUrl((await source("website/websiteOrdersService.js"))
+const settlementSource = (await source("website/websiteOrdersService.js"))
   .replace('"../../lib/supabase.js"', JSON.stringify(db))
   .replace('"./websiteDeliveryService.js"', JSON.stringify(delivery))
-  .replace('"../payment/ozon/ozonPayService.js"', JSON.stringify(provider)));
+  .replace('"../payment/ozon/ozonPayService.js"', JSON.stringify(provider));
+const service = moduleUrl(settlementSource);
+const rolloutStart = "2026-11-23T15:00:00Z";
 const { createOzonPayNotificationSign, createOzonPayGetOrderStatusSign } = await import(provider);
 
 const ready = {
@@ -44,14 +46,24 @@ globalThis.webhookFixture = {
     rpc: (...args) => globalThis.webhookFixture.rpc(...args),
   },
 };
-const { default: routes } = await import(moduleUrl((await source("website/websitePaymentRoutes.js"))
+const routeSource = (await source("website/websitePaymentRoutes.js"))
   .replace('"./websitePaymentFeature.js"', JSON.stringify(featureUrl))
   .replace('"./websitePaymentAccessToken.js"', JSON.stringify(token))
-  .replace('"./websiteOrdersService.js"', JSON.stringify(service))
-  .replace('"../payment/ozon/ozonPayService.js"', JSON.stringify(provider))));
+  .replace('"../payment/ozon/ozonPayService.js"', JSON.stringify(provider));
 
-async function setup(t, { row = ready, providerResponse = paid, commit, http } = {}) {
+async function setup(t, { row = ready, providerResponse = paid, commit, http, auto = false, startAt = rolloutStart } = {}) {
   const app = Fastify();
+  const routeService = auto ? moduleUrl(`
+    const process = { env: {
+      WEBSITE_OZON_DELIVERY_AUTO_CREATE_ENABLED: "true",
+      WEBSITE_OZON_DELIVERY_AUTO_CREATE_START_AT: ${JSON.stringify(startAt)},
+      OZON_WEBSITE_STANDARD_PARCEL_VARIANT_IDS: "422",
+    } };
+    ${settlementSource}
+  `) : service;
+  const { default: routes } = await import(moduleUrl(
+    routeSource.replace('"./websiteOrdersService.js"', JSON.stringify(routeService))
+  ));
   await app.register(routes);
   t.after(() => app.close());
   const calls = [];
@@ -98,10 +110,13 @@ async function setup(t, { row = ready, providerResponse = paid, commit, http } =
       calls.push("rpc");
       check(() => {
         assert.ok(signal instanceof AbortSignal);
-        assert.equal(name, "confirm_website_order_payment_v1");
+        const queue = auto && startAt === rolloutStart;
+        assert.equal(name, queue
+          ? "confirm_website_order_payment_and_queue_delivery_v1" : "confirm_website_order_payment_v1");
         assert.deepEqual(args, {
           p_order_id: ready.id, p_ozon_payment_id: ready.ozon_payment_id,
           p_order_number: ready.order_number, p_amount_kopecks: 125045,
+          ...(queue && { p_start_at: rolloutStart }),
         });
       });
       if (commit) return commit({ stored, setConfirmed, result });
@@ -151,6 +166,26 @@ test("valid notification settles once and a duplicate verifies status again", as
   assert.deepEqual(fixture.calls, ["lookup", "provider", "rpc", "lookup", "provider"]);
   assert.equal(fixture.transitions(), 1);
   assert.deepEqual(fixture.stored(), confirmed);
+});
+
+test("verified paid webhook calls the atomic settlement and enqueue RPC once across duplicate webhooks", async (t) => {
+  const fixture = await setup(t, { auto: true });
+  assertResponse(await fixture.send(), 200);
+  assertResponse(await fixture.send(), 200);
+  assert.deepEqual(fixture.calls, ["lookup", "provider", "rpc", "lookup", "provider"]);
+  assert.equal(fixture.transitions(), 1);
+});
+
+test("enabled automation does not enqueue for an unpaid provider response", async (t) => {
+  const fixture = await setup(t, { auto: true, providerResponse: { ...paid, status: "STATUS_AUTHORIZED" } });
+  assertResponse(await fixture.send(), 503);
+  assert.deepEqual(fixture.calls, ["lookup", "provider"]);
+});
+
+test("invalid rollout boundary leaves verified settlement on the existing RPC", async (t) => {
+  const fixture = await setup(t, { auto: true, startAt: "2026-02-30T00:00:00Z" });
+  assertResponse(await fixture.send(), 200);
+  assert.equal(fixture.transitions(), 1);
 });
 
 for (const [name, options, changes, afterSigning, status, calls] of [

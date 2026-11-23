@@ -732,6 +732,16 @@ export async function getWebsiteOrderRaspivItems(
 const settlementUnavailable = () => orderRequestError(503, undefined, "Payment settlement is unresolved");
 const settlementConflict = () => orderRequestError(409, undefined, "Payment does not match an eligible order");
 
+export function getWebsiteDeliveryAutoStartAt() {
+  if (process.env.WEBSITE_OZON_DELIVERY_AUTO_CREATE_ENABLED !== "true") return null;
+  const startAt = process.env.WEBSITE_OZON_DELIVERY_AUTO_CREATE_START_AT;
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(startAt ?? "") ||
+      !Number.isFinite(Date.parse(startAt)) ||
+      new Date(startAt).toISOString() !== startAt.replace("Z", ".000Z")) return null;
+  const approved = (process.env.OZON_WEBSITE_STANDARD_PARCEL_VARIANT_IDS ?? "").split(",");
+  return approved.some((id) => id.trim() === "422") ? startAt : null;
+}
+
 async function readWebsitePayment(column, value) {
   try {
     // Preserve the exact PostgreSQL numeric value across the JSON boundary.
@@ -787,11 +797,16 @@ async function confirmVerifiedWebsitePayment(order, status, amountKopecks) {
 
   let result;
   try {
-    result = await supabase.rpc("confirm_website_order_payment_v1", {
+    const websiteDeliveryAutoStartAt = getWebsiteDeliveryAutoStartAt();
+    const rpc = websiteDeliveryAutoStartAt
+      ? "confirm_website_order_payment_and_queue_delivery_v1"
+      : "confirm_website_order_payment_v1";
+    result = await supabase.rpc(rpc, {
       p_order_id: order.id,
       p_ozon_payment_id: order.ozon_payment_id,
       p_order_number: order.order_number,
       p_amount_kopecks: amountKopecks,
+      ...(websiteDeliveryAutoStartAt && { p_start_at: websiteDeliveryAutoStartAt }),
     }).abortSignal(AbortSignal.timeout(10000));
   } catch {
     // A thrown or timed-out response can follow a successful commit.

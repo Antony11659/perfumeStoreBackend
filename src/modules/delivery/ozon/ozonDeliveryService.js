@@ -135,6 +135,7 @@ export async function ozonDeliveryRequest(
     signal,
     idempotencyKey,
     diagnostics,
+    beforeRequest,
   } = {}
 ) {
   if (diagnostics) {
@@ -185,7 +186,14 @@ export async function ozonDeliveryRequest(
     }
 
 
-    if (diagnostics) diagnostics.response = undefined;
+    if (beforeRequest) {
+      beforeRequest();
+      signal?.throwIfAborted();
+    }
+    if (diagnostics) {
+      diagnostics.response = undefined;
+      diagnostics.requestStarted = true;
+    }
     const response =
       await fetch(
         url,

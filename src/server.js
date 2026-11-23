@@ -15,6 +15,7 @@ import promoRoutes from "./modules/promo/promoRoutes.js";
 import websiteOrdersRoutes from "./modules/website/websiteOrdersRoutes.js";
 import websiteDeliveryRoutes from "./modules/website/websiteDeliveryRoutes.js";
 import websiteDeliveryCreationRoutes from "./modules/website/websiteDeliveryCreationRoutes.js";
+import websiteDeliveryWorker from "./modules/website/websiteDeliveryWorker.js";
 import websitePaymentRoutes from "./modules/website/websitePaymentRoutes.js";
 import ozonSellerOAuthRoutes from "./modules/delivery/ozonSeller/ozonSellerOAuthRoutes.js";
 
@@ -103,6 +104,7 @@ fastify.register(
 );
 
 fastify.register(websiteDeliveryCreationRoutes);
+fastify.register(websiteDeliveryWorker);
 
 // await fastify.register(ozonDeliveryRoutes, {
 //   prefix: "/delivery/ozon",
@@ -168,4 +170,15 @@ const start = async () => {
   }
 };
 
+const shutdown = async () => {
+  try {
+    await fastify.close();
+  } catch {
+    fastify.log.error("Backend shutdown failed");
+    process.exitCode = 1;
+  }
+};
+
+process.once("SIGTERM", shutdown);
+process.once("SIGINT", shutdown);
 start();

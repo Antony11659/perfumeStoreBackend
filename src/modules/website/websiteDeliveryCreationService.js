@@ -19,6 +19,7 @@ function deliveryError(statusCode, code, message) {
 
 const unavailable = () => deliveryError(503, "DELIVERY_UNAVAILABLE", "Shipment storage is unavailable");
 const blocked = (message) => deliveryError(422, "FULFILLMENT_BLOCKED", message);
+const cutoffExpired = (message, job) => job ? deliveryError(422, "CUTOFF_EXPIRED", message) : blocked(message);
 const conflict = () => deliveryError(409, "SHIPMENT_CONFLICT", "Shipment already exists or creation is in progress. Reconcile unresolved attempts before proceeding.");
 
 async function logOzonFailure(operation, diagnostics, error) {
@@ -86,7 +87,7 @@ function futureCutoff(value) {
   return typeof value === "string" && Date.parse(value) > Date.now();
 }
 
-async function prepareDeliveryBody(order, delivery) {
+async function prepareDeliveryBody(order, delivery, job) {
   const point = String(delivery.delivery_point_id ?? "");
   if (!/^[1-9]\d*$/.test(point) || !Number.isSafeInteger(Number(point))) {
     throw blocked("The saved Ozon pickup point ID is missing or invalid");
@@ -100,7 +101,7 @@ async function prepareDeliveryBody(order, delivery) {
   if (!name || typeof order.order_number !== "string" || !order.order_number.trim()) {
     throw blocked("The saved recipient name or order reference is missing");
   }
-  if (!futureCutoff(delivery.cutoff_at)) throw blocked("The saved delivery cutoff is missing or expired");
+  if (!futureCutoff(delivery.cutoff_at)) throw cutoffExpired("The saved delivery cutoff is missing or expired", job);
   if (!Number.isSafeInteger(OZON_WEBSITE_SHIPMENT_METHOD_ID) || OZON_WEBSITE_SHIPMENT_METHOD_ID <= 0) {
     throw blocked("The Web Site Shop shipment method is unavailable");
   }
@@ -142,17 +143,18 @@ async function prepareDeliveryBody(order, delivery) {
   };
 }
 
-async function recordOutcome(orderId, key, state, errorCode, identifiers = {}) {
-  const { data, error } = await supabase.from("website_order_deliveries")
+async function recordOutcome(orderId, key, state, errorCode, identifiers = {}, claimedAt) {
+  let query = supabase.from("website_order_deliveries")
     .update({ ...identifiers, creation_state: state, creation_error: errorCode, creation_updated_at: new Date().toISOString() })
-    .eq("order_id", orderId).eq("creation_key", key).eq("creation_state", "creating")
-    .select("creation_key").abortSignal(AbortSignal.timeout(10000)).maybeSingle();
+    .eq("order_id", orderId).eq("creation_key", key).eq("creation_state", "creating");
+  if (claimedAt) query = query.eq("creation_updated_at", claimedAt);
+  const { data, error } = await query.select("creation_key").abortSignal(AbortSignal.timeout(10000)).maybeSingle();
   if (error || data?.creation_key !== key) {
     throw deliveryError(503, "SHIPMENT_OUTCOME_UNCONFIRMED", "Shipment outcome could not be saved. Reconcile before retrying.");
   }
 }
 
-export async function createWebsiteDeliveryOrder(orderId, retry = false) {
+export async function createWebsiteDeliveryOrder(orderId, retry = false, job) {
   const { data: order, error: orderError } = await supabase.from("website_orders")
     .select("id,order_number,customer_name,phone,subtotal::text,status,payment_state")
     .eq("id", orderId).abortSignal(AbortSignal.timeout(10000)).maybeSingle();
@@ -175,18 +177,23 @@ export async function createWebsiteDeliveryOrder(orderId, retry = false) {
   if (retry ? !["unknown", "retryable"].includes(delivery.creation_state) : delivery.creation_state !== null) {
     throw conflict();
   }
-  const key = retry ? delivery.creation_key : randomUUID();
-  const body = retry ? delivery.creation_body : JSON.stringify(await prepareDeliveryBody(order, delivery));
+  const body = retry ? delivery.creation_body : JSON.stringify(await prepareDeliveryBody(order, delivery, job));
   const payload = JSON.parse(body);
   const [posting] = payload.postings;
   if (!futureCutoff(posting.cutoff_at)) throw blocked("The saved attempt has an expired cutoff. Reconcile with Ozon before proceeding.");
 
-  const { data: claim, error: claimError } = await supabase.rpc("claim_website_delivery_creation_v1", {
-    p_order_id: orderId, p_key: key, p_body: body, p_retry: retry,
+  job?.assertActive();
+  const key = retry ? delivery.creation_key : randomUUID();
+  const claimRpc = job ? "claim_website_delivery_for_job_v1" : "claim_website_delivery_creation_v1";
+  const { data: claim, error: claimError } = await supabase.rpc(claimRpc, {
+    p_order_id: orderId, p_key: key, p_body: body,
+    ...(job ? { p_lease_token: job.token, p_start_at: job.startAt } : { p_retry: retry }),
   }).abortSignal(AbortSignal.timeout(10000));
   if (claimError || !Array.isArray(claim)) throw unavailable();
   if (!claim.length) throw conflict();
   if (claim.length !== 1 || claim[0].creation_key !== key || claim[0].creation_body !== body) throw unavailable();
+  const claimedAt = job ? claim[0].claimed_at : undefined;
+  if (job && (typeof claimedAt !== "string" || !Number.isFinite(Date.parse(claimedAt)))) throw unavailable();
 
   const { posting_external_id, description, ...checkoutPosting } = posting;
   const sensitiveValues = [
@@ -195,6 +202,7 @@ export async function createWebsiteDeliveryOrder(orderId, retry = false) {
   ];
   const checkoutDiagnostics = { sensitiveValues };
   try {
+    job?.assertActive();
     const response = await ozonDeliveryRequest("/v1/order/checkout", {
       body: {
         recipient: { phone_number: payload.recipient.phone_number },
@@ -217,13 +225,14 @@ export async function createWebsiteDeliveryOrder(orderId, retry = false) {
       checkoutDiagnostics.category = "invalid_provider_response";
       throw unavailable();
     }
-    if (!futureCutoff(posting.cutoff_at)) throw blocked("The saved delivery cutoff expired during checkout");
+    if (!futureCutoff(posting.cutoff_at)) throw cutoffExpired("The saved delivery cutoff expired during checkout", job);
   } catch (error) {
-    if (error?.code !== "FULFILLMENT_BLOCKED" || checkoutDiagnostics.providerError) {
+    if (error?.statusCode !== 422 || checkoutDiagnostics.providerError) {
       await logOzonFailure("checkout", checkoutDiagnostics, error).catch(() => {});
     }
-    await recordOutcome(orderId, key, claim[0].previous_state === "unknown" ? "unknown" : "retryable", "CHECKOUT_FAILED");
-    if (error?.code === "FULFILLMENT_BLOCKED") throw error;
+    await recordOutcome(orderId, key, claim[0].previous_state === "unknown" ? "unknown" : "retryable",
+      "CHECKOUT_FAILED", undefined, claimedAt);
+    if (error?.statusCode === 422) throw error;
     throw deliveryError(502, "CHECKOUT_FAILED", "Ozon shipment checkout could not be confirmed");
   }
 
@@ -235,6 +244,10 @@ export async function createWebsiteDeliveryOrder(orderId, retry = false) {
       idempotencyKey: key,
       signal: AbortSignal.timeout(10000),
       diagnostics: createDiagnostics,
+      beforeRequest: job && (() => {
+        job.assertActive();
+        if (!futureCutoff(posting.cutoff_at)) throw cutoffExpired("The saved delivery cutoff expired before creation", job);
+      }),
     });
     if (!response.ok) throw unavailable();
     const result = await response.json();
@@ -249,10 +262,15 @@ export async function createWebsiteDeliveryOrder(orderId, retry = false) {
     identifiers = { external_order_number: result.order_number, external_posting_number: returnedPosting.posting_number };
   } catch (error) {
     await logOzonFailure("create", createDiagnostics, error).catch(() => {});
-    await recordOutcome(orderId, key, "unknown", "CREATE_OUTCOME_UNKNOWN");
+    if (job && !createDiagnostics.requestStarted) {
+      await recordOutcome(orderId, key, "retryable", "CREATE_NOT_SENT", undefined, claimedAt);
+      if (error?.statusCode === 422) throw error;
+      throw deliveryError(502, "CREATE_NOT_SENT", "Ozon shipment creation was not sent");
+    }
+    await recordOutcome(orderId, key, "unknown", "CREATE_OUTCOME_UNKNOWN", undefined, claimedAt);
     throw deliveryError(502, "CREATE_OUTCOME_UNKNOWN", "Ozon creation outcome is unknown. Reconcile before an explicit same-request retry.");
   }
 
-  await recordOutcome(orderId, key, "created", null, identifiers);
+  await recordOutcome(orderId, key, "created", null, identifiers, claimedAt);
   return { orderNumber: identifiers.external_order_number, postingNumber: identifiers.external_posting_number };
 }

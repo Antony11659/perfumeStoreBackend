@@ -87,9 +87,10 @@ function success(payload) {
 async function setup(t, {
   enabled = "true", orderFields = {}, deliveryFields = {}, onOAuth, onCheckout, onCreate, rejectSave, rejectClaim,
   approvedVariants = "42", items = [{ variant_id: "42", quantity: 1, unit_price: "150.20", line_total: "150.20" }],
+  automatic = false,
 } = {}) {
   const order = {
-    id: 11, order_number: "LDP-SYNTHETIC", status: "paid", payment_state: "confirmed",
+    id: automatic ? "11" : 11, order_number: "LDP-SYNTHETIC", status: "paid", payment_state: "confirmed",
     customer_name: "Synthetic recipient", phone: "+7 (999) 000-00-00", subtotal: "150.20",
     ...orderFields,
   };
@@ -104,6 +105,8 @@ async function setup(t, {
   const claimKeys = [];
   const creates = [];
   const checked = [];
+  const finished = [];
+  let leaseToken;
   globalThis.shipmentFixture = {
     from(table) {
       return {
@@ -128,7 +131,8 @@ async function setup(t, {
             select() { return query; },
             abortSignal() { return query; },
             async maybeSingle() {
-              assert.deepEqual(filters, { order_id: order.id, creation_key: saved.creation_key, creation_state: "creating" });
+              assert.deepEqual(filters, { order_id: order.id, creation_key: saved.creation_key, creation_state: "creating",
+                ...(automatic && { creation_updated_at: saved.creation_updated_at }) });
               if (rejectSave) return { data: null, error: { code: "fixture-write-failed" } };
               Object.assign(saved, fields);
               return { data: { creation_key: saved.creation_key }, error: null };
@@ -139,8 +143,22 @@ async function setup(t, {
       };
     },
     rpc(name, args) {
-      assert.equal(name, "claim_website_delivery_creation_v1");
+      if (name === "claim_website_delivery_job_v1") {
+        assert.ok(automatic);
+        assert.equal(leaseToken, undefined);
+        leaseToken = args.p_lease_token;
+        return { async abortSignal() { return { data: [{ order_id: order.id }], error: null }; } };
+      }
       assert.equal(args.p_order_id, order.id);
+      if (automatic) assert.equal(args.p_lease_token, leaseToken);
+      if (name === "finish_website_delivery_job_v1") {
+        finished.push(args.p_reason);
+        const data = saved.creation_state === "created" ? "completed" :
+          ["CREATE_OUTCOME_UNKNOWN", "SHIPMENT_CONFLICT", "CUTOFF_EXPIRED"].includes(args.p_reason)
+            ? "blocked" : "failed";
+        return { async abortSignal() { return { data, error: null }; } };
+      }
+      assert.equal(name, automatic ? "claim_website_delivery_for_job_v1" : "claim_website_delivery_creation_v1");
       return { async abortSignal() {
         calls.push("claim");
         if (rejectClaim) return { data: null, error: { code: "fixture-claim-missing" } };
@@ -157,7 +175,10 @@ async function setup(t, {
         }
         claimKeys.push(args.p_key);
         Object.assign(saved, { creation_state: "creating", creation_key: args.p_key, creation_body: args.p_body });
-        return { data: [{ creation_key: saved.creation_key, creation_body: saved.creation_body, previous_state: previous }], error: null };
+        const claimedAt = automatic ? new Date().toISOString() : undefined;
+        if (automatic) saved.creation_updated_at = claimedAt;
+        return { data: [{ creation_key: saved.creation_key, creation_body: saved.creation_body,
+          previous_state: previous, claimed_at: claimedAt }], error: null };
       } };
     },
   };
@@ -191,7 +212,7 @@ async function setup(t, {
     method: "POST", url: `/website/orders/${orderId}/delivery/create`,
     headers: { "x-website-delivery-admin-key": key }, payload: body,
   });
-  return { app, request, saved, creates, checked, calls, claimKeys, order };
+  return { app, request, saved, creates, checked, calls, claimKeys, order, finished };
 }
 
 await test("manual creation claims, checks matching checkout inputs, and saves linked Ozon references", async (t) => {
@@ -485,4 +506,92 @@ await test("a logging failure still persists the uncertain creation outcome", as
   assert.equal(f.saved.creation_state, "unknown");
   assert.equal(f.creates.length, 1);
   assert.equal(logger.mock.callCount(), 1);
+});
+async function runWorker(enabled = true) {
+  const timers = [];
+  const hooks = {};
+  const logs = [];
+  globalThis.deliveryWorkerTimer = (callback) => {
+    timers.push(callback);
+    return { unref() {} };
+  };
+  try {
+    const { default: worker } = await import(moduleUrl(`
+      const setTimeout = (...args) => globalThis.deliveryWorkerTimer(...args);
+      const clearTimeout = () => {};
+      ${(await source("website/websiteDeliveryWorker.js"))
+        .replace('"../../lib/supabase.js"', JSON.stringify(moduleUrl(
+          "export const supabase = new Proxy({}, { get: (_, key) => globalThis.shipmentFixture[key] });"
+        )))
+        .replace('"./websiteOrdersService.js"', JSON.stringify(moduleUrl(
+          `export const getWebsiteDeliveryAutoStartAt = () => ${JSON.stringify(enabled ? "2026-11-23T15:00:00Z" : null)};`
+        )))
+        .replace('"./websiteDeliveryCreationService.js"', JSON.stringify(moduleUrl(`
+          const process = { env: { OZON_WEBSITE_STANDARD_PARCEL_VARIANT_IDS: "422" } };
+          ${serviceSource}
+        `)))}
+    `));
+    await worker({
+      addHook(name, callback) { hooks[name] = callback; },
+      log: { info(entry) { logs.push(entry); }, warn(entry) { logs.push(entry); } },
+    });
+    if (enabled) {
+      await hooks.onListen();
+      assert.equal(timers.length, 1);
+      timers[0]();
+      await hooks.preClose();
+      await hooks.onClose();
+      assert.equal(timers.length, 1);
+    } else {
+      assert.deepEqual(hooks, {});
+      assert.equal(timers.length, 0);
+    }
+    return logs;
+  } finally {
+    delete globalThis.deliveryWorkerTimer;
+  }
+}
+
+const standardItem = [{ variant_id: "422", quantity: 1, unit_price: "150.20", line_total: "150.20" }];
+for (const [name, options, state, reason, expectedCreates] of [
+  ["success", {}, "created", null, 1],
+  ["already created", { deliveryFields: { creation_state: "created", external_order_number: "existing" } },
+    "created", "SHIPMENT_CONFLICT", 0],
+  ["unknown", { deliveryFields: { creation_state: "unknown", creation_key: "original-key", creation_body: "original-body" } },
+    "unknown", "SHIPMENT_CONFLICT", 0],
+  ["expired cutoff", { deliveryFields: { cutoff_at: "2000-01-01T00:00:00Z" } },
+    null, "CUTOFF_EXPIRED", 0],
+  ["ineligible parcel", { items: [{ ...standardItem[0], quantity: 2 }] }, null, "FULFILLMENT_BLOCKED", 0],
+  ["OAuth failed before create", { onOAuth: (() => {
+    let calls = 0;
+    return () => ++calls === 2 ? new Response(null, { status: 503 }) : undefined;
+  })() }, "retryable", "CREATE_NOT_SENT", 0],
+  ["connection lost after dispatch", { onCreate() { throw new Error("fixture transport error"); } },
+    "unknown", "CREATE_OUTCOME_UNKNOWN", 1],
+]) {
+  await test(`automatic worker: ${name}`, async (t) => {
+    const f = await setup(t, { automatic: true, items: standardItem, ...options });
+    const logs = await runWorker();
+    assert.equal(logs[0].event, "website_delivery_job_finished");
+    assert.deepEqual(f.finished, [reason]);
+    assert.equal(f.creates.length, expectedCreates);
+    assert.equal(f.saved.creation_state, state);
+    if (expectedCreates) {
+      assert.equal(f.creates[0].headers["Idempotency-Key"], f.saved.creation_key);
+      assert.equal(f.creates[0].body, f.saved.creation_body);
+    }
+    if (name === "unknown") {
+      assert.equal(f.saved.creation_key, "original-key");
+      assert.equal(f.saved.creation_body, "original-body");
+    }
+    if (["already created", "unknown", "expired cutoff", "ineligible parcel"].includes(name)) {
+      assert.equal(f.claimKeys.length, 0);
+    }
+  });
+}
+
+await test("disabled automatic worker starts no poll and sends no request", async (t) => {
+  const f = await setup(t, { automatic: true, items: standardItem });
+  await runWorker(false);
+  assert.deepEqual(f.calls, []);
 });

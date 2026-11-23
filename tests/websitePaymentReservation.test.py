@@ -12,6 +12,16 @@ import unittest
 MIGRATIONS = Path(__file__).resolve().parents[1] / "supabase" / "migrations"
 STAGE_2 = MIGRATIONS / "20261116000000_website_order_idempotency.sql"
 PAYMENT = MIGRATIONS / "20261118000000_website_payment_reservation.sql"
+DELIVERY = MIGRATIONS / "20261120000000_website_delivery_creation.sql"
+DELIVERY_JOBS = MIGRATIONS / "20261123000000_website_delivery_jobs.sql"
+ROLLOUT = "'2026-11-23T15:00:00Z'"
+FIRST_LEASE = "'00000000-0000-4000-8000-000000000010'"
+SECOND_LEASE = "'00000000-0000-4000-8000-000000000020'"
+SHIPMENT_KEY = "'00000000-0000-4000-8000-000000000030'"
+SHIPMENT_BODY = """'{"order_external_id":"auto-recovery","recipient":{"full_name":"Fixture",
+  "phone_number":"+79990000000"},"delivery":{"delivery_point":{"delivery_point_id":42}},
+  "postings":[{"description":"Perfume","dimensions":{"weight_g":60},
+  "declared_value":{"amount":"1250.45"},"cutoff_at":"2099-01-01T00:00:00Z"}]}'"""
 
 # Minimal fixture for the verified order columns and the existing RPC's
 # insert lists. Child types and permissions here are local test fixtures.
@@ -73,6 +83,8 @@ class PaymentReservationTest(unittest.TestCase):
         cls.query(FIXTURE)
         cls.run_tool(*cls.psql, "-f", STAGE_2)
         cls.run_tool(*cls.psql, "-f", PAYMENT)
+        cls.run_tool(*cls.psql, "-f", DELIVERY)
+        cls.run_tool(*cls.psql, "-f", DELIVERY_JOBS)
 
     @staticmethod
     def run_tool(tool, *args):
@@ -320,6 +332,141 @@ class PaymentReservationTest(unittest.TestCase):
                     self.query(f"SET ROLE {role}; " + sql)
         self.assertEqual(self.query("SET ROLE service_role; " + sql),
                          f"{order_id}|settle-grants|1250.45|paid|confirmed|provider-grants")
+
+    def seed_delivery_job_order(self, number, variant=422, created_at="2026-11-23T15:00:01Z"):
+        order_id = self.seed_payment(number, provider_id=number)
+        self.query(f"""
+          UPDATE public.website_orders SET created_at = '{created_at}', subtotal = total,
+            customer_name = 'Fixture', phone = '79990000000' WHERE id = {order_id};
+          INSERT INTO public.website_order_items (order_id, variant_id, quantity) VALUES ({order_id}, {variant}, 1);
+          INSERT INTO public.website_order_deliveries
+            (order_id, provider, delivery_type, status, delivery_point_id, cutoff_at)
+          VALUES ({order_id}, 'ozon', 'pvz', 'calculated', '42', '2099-01-01T00:00:00Z');
+        """)
+        return order_id
+
+    @staticmethod
+    def settle_with_job(order_id, number, amount=125045):
+        return ("SELECT id FROM public.confirm_website_order_payment_and_queue_delivery_v1("
+                f"{order_id}, '{number}', '{number}', {amount}, {ROLLOUT});")
+
+    @staticmethod
+    def claim_job(lease):
+        return f"SELECT order_id FROM public.claim_website_delivery_job_v1({lease}, {ROLLOUT});"
+
+    def expire_job(self, order_id):
+        self.query(f"UPDATE public.website_delivery_jobs SET lease_until = now() WHERE order_id = {order_id}")
+
+    def test_auto_payment_enqueue_gates_and_transaction(self):
+        as_service = "SET ROLE service_role; "
+        for name, variant, created_at, amount, expected in [
+            ("auto-eligible", 422, "2026-11-23T15:00:00Z", 125045, True),
+            ("auto-ineligible", 423, "2026-11-23T15:00:01Z", 125045, False),
+            ("auto-historical", 422, "2026-11-23T14:59:59Z", 125045, False),
+            ("auto-unpaid", 422, "2026-11-23T15:00:01Z", 1, False),
+        ]:
+            with self.subTest(name=name):
+                order_id = self.seed_delivery_job_order(name, variant, created_at)
+                sql = self.settle_with_job(order_id, name, amount)
+                paid = amount == 125045
+                self.assertEqual(self.query(as_service + sql), str(order_id) if paid else "")
+                self.assertEqual(self.query(as_service + sql), "")
+                self.assertEqual(self.state(order_id), "confirmed" if paid else "ready")
+                self.assertEqual(self.query(
+                    f"SELECT count(*) FROM public.website_delivery_jobs WHERE order_id = {order_id}"
+                ), "1" if expected else "0")
+                if expected:
+                    self.query(f"DELETE FROM public.website_delivery_jobs WHERE order_id = {order_id}")
+
+        rolled_back = self.seed_delivery_job_order("auto-rollback")
+        self.query("BEGIN; " + as_service + self.settle_with_job(rolled_back, "auto-rollback") + "ROLLBACK;")
+        self.assertEqual(self.state(rolled_back), "ready")
+        self.assertEqual(self.query("SELECT count(*) FROM public.website_delivery_jobs"), "0")
+        for role in ("anon", "authenticated"):
+            with self.assertRaisesRegex(RuntimeError, "permission denied for function"):
+                self.query(f"SET ROLE {role}; " + self.claim_job(FIRST_LEASE))
+
+    def test_auto_explicit_order_exclusions(self):
+        self.query(f"""
+          BEGIN;
+          INSERT INTO public.website_orders
+            (id, order_number, total, created_at, payment_state, ozon_payment_id, payment_link)
+          SELECT id, 'excluded-' || id, 1250.45, {ROLLOUT}::timestamptz, 'ready', 'excluded-' || id,
+            'https://payment.example.invalid/link' FROM (VALUES (12), (15)) AS ids(id);
+          INSERT INTO public.website_order_items (order_id, variant_id, quantity) VALUES (12, 422, 1), (15, 422, 1);
+          INSERT INTO public.website_order_deliveries (order_id, provider, delivery_type, status)
+            VALUES (12, 'ozon', 'pvz', 'calculated'), (15, 'ozon', 'pvz', 'calculated');
+          SET ROLE service_role;
+          {self.settle_with_job(12, "excluded-12")}
+          {self.settle_with_job(15, "excluded-15")}
+          DO $$
+          BEGIN
+            IF (SELECT count(*) FROM public.website_orders
+                WHERE id IN (12, 15) AND payment_state = 'confirmed') <> 2 OR
+               EXISTS (SELECT 1 FROM public.website_delivery_jobs WHERE order_id IN (12, 15)) THEN
+              RAISE EXCEPTION 'Excluded orders must settle without queuing jobs';
+            END IF;
+          END;
+          $$;
+          ROLLBACK;
+        """)
+
+    def test_auto_worker_claim_concurrency_and_crash_recovery(self):
+        as_service = "SET ROLE service_role; "
+        order_id = self.seed_delivery_job_order("auto-recovery")
+        self.assertEqual(self.query(as_service + self.settle_with_job(order_id, "auto-recovery")), str(order_id))
+        with subprocess.Popen(self.psql, env={}, text=True, stdin=subprocess.PIPE,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE) as first:
+            first.stdin.write("BEGIN; SET LOCAL statement_timeout = '8s'; "
+                              + as_service + self.claim_job(FIRST_LEASE) + "\n")
+            first.stdin.flush()
+            self.assertEqual(first.stdout.readline().strip(), str(order_id))
+            self.assertEqual(self.query(as_service + self.claim_job(SECOND_LEASE)), "")
+            first.communicate("COMMIT;\n", timeout=5)
+            self.assertEqual(first.returncode, 0)
+        self.assertEqual(self.query(as_service + self.claim_job(SECOND_LEASE)), "")
+
+        self.expire_job(order_id)
+        self.assertEqual(self.query(as_service + self.claim_job(SECOND_LEASE)), str(order_id))
+        bind = (f"SELECT creation_key FROM public.claim_website_delivery_for_job_v1({order_id}, "
+                f"{{lease}}, {ROLLOUT}, {SHIPMENT_KEY}, {SHIPMENT_BODY});")
+        self.assertEqual(self.query(as_service + bind.replace("{lease}", FIRST_LEASE)), "")
+        self.assertEqual(self.query(as_service + bind.replace("{lease}", SECOND_LEASE)), SHIPMENT_KEY.strip("'"))
+        saved = f"FROM public.website_order_deliveries WHERE order_id = {order_id}"
+        self.assertEqual(self.query(f"SELECT creation_state {saved}"), "creating")
+        self.expire_job(order_id)
+        self.assertEqual(self.query(as_service + self.claim_job(FIRST_LEASE)), "")
+        self.assertEqual(self.query(
+            f"SELECT creation_state, creation_key = {SHIPMENT_KEY}, creation_body = {SHIPMENT_BODY} {saved}"
+        ), "unknown|t|t")
+        self.assertEqual(self.query(
+            f"SELECT state, failure_reason, attempts FROM public.website_delivery_jobs WHERE order_id = {order_id}"
+        ), "blocked|CREATE_OUTCOME_UNKNOWN|2")
+        self.assertEqual(self.query(as_service + self.claim_job(FIRST_LEASE)), "")
+
+    def test_auto_worker_finish_respects_a_newer_manual_same_key_claim(self):
+        as_service = "SET ROLE service_role; "
+        order_id = self.seed_delivery_job_order("auto-manual-race")
+        body = SHIPMENT_BODY.replace("auto-recovery", "auto-manual-race")
+        key = "'00000000-0000-4000-8000-000000000040'"
+        self.query(as_service + self.settle_with_job(order_id, "auto-manual-race"))
+        self.assertEqual(self.query(as_service + self.claim_job(FIRST_LEASE)), str(order_id))
+        self.assertEqual(self.query(as_service +
+            f"SELECT creation_key FROM public.claim_website_delivery_for_job_v1("
+            f"{order_id}, {FIRST_LEASE}, {ROLLOUT}, {key}, {body});"
+        ), key.strip("'"))
+        self.query(
+            f"UPDATE public.website_order_deliveries SET creation_state = 'retryable' WHERE order_id = {order_id}"
+        )
+        self.assertEqual(self.query(as_service +
+            f"SELECT creation_key FROM public.claim_website_delivery_creation_v1({order_id}, {key}, {body}, true);"
+        ), key.strip("'"))
+        self.assertEqual(self.query(as_service +
+            f"SELECT public.finish_website_delivery_job_v1({order_id}, {FIRST_LEASE}, 'CHECKOUT_FAILED');"
+        ), "blocked")
+        self.assertEqual(self.query(
+            f"SELECT creation_state FROM public.website_order_deliveries WHERE order_id = {order_id}"
+        ), "creating")
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
