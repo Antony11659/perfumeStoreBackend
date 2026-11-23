@@ -123,8 +123,8 @@ export async function getOzonDeliveryAccessToken({ signal, diagnostics } = {}) {
 /**
  * Make an authenticated request to Ozon Delivery API.
  *
- * Ozon Delivery may respond with 302/307 and a
- * testcookie. Node fetch does not persist cookies
+ * Ozon Delivery may respond with 302/307 and
+ * challenge cookies. Node fetch does not persist cookies
  * automatically, so redirects are handled manually.
  */
 export async function ozonDeliveryRequest(
@@ -260,7 +260,9 @@ export async function ozonDeliveryRequest(
     if (nextUrl.origin !== OZON_DELIVERY_API_URL) redirectReason = "cross_origin";
     else if (nextUrl.username || nextUrl.password) redirectReason = "url_credentials";
     else if (idempotencyKey && nextUrl.pathname !== path) redirectReason = "path_changed";
-    else if (idempotencyKey && !/(?:^|,\s*)testcookie=/.test(setCookie || "")) redirectReason = "missing_testcookie";
+    else if (idempotencyKey && response.status === 302 && !/(?:^|,\s*)testcookie=/.test(setCookie || "")) {
+      redirectReason = "missing_testcookie";
+    }
     if (redirectReason) {
       if (diagnostics) diagnostics.redirectReason = redirectReason;
       throw new Error("Unsafe Ozon Delivery redirect");

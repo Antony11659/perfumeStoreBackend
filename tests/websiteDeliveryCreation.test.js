@@ -179,7 +179,7 @@ async function setup(t, {
     }
     assert.equal(path, "/v1/order/create");
     calls.push("create");
-    creates.push({ url, body: options.body, headers: options.headers });
+    creates.push({ url, method: options.method, body: options.body, headers: options.headers });
     return onCreate ? onCreate(payload, creates.length) : success(payload);
   });
   const app = Fastify();
@@ -337,33 +337,67 @@ await test("unavailable claim RPC blocks every provider request", async (t) => {
   assert.equal(f.saved.parcel, null);
 });
 
-await test("same-origin testcookie replay preserves the serialized request and idempotency key", async (t) => {
-  const f = await setup(t, { onCreate(payload, count) {
-    if (count === 1) return new Response(null, {
-      status: 307, headers: { location: "/v1/order/create?challenge=1", "set-cookie": "testcookie=fixture; Secure" },
-    });
-    return success(payload);
-  } });
-  assert.equal((await f.request()).statusCode, 201);
-  assert.equal(f.creates.length, 2);
-  assert.equal(f.creates[1].body, f.creates[0].body);
-  assert.equal(f.creates[1].headers["Idempotency-Key"], f.creates[0].headers["Idempotency-Key"]);
-  assert.equal(f.creates[1].headers.Cookie, "testcookie=fixture");
-});
-
-for (const [label, location, cookie] of [
-  ["cross-origin redirect", "https://untrusted.example/v1/order/create", "testcookie=fixture"],
-  ["redirect without a testcookie challenge", "/v1/order/create", "other-cookie=fixture"],
-]) {
-  await test(`blocks ${label} without replaying the mutation`, async (t) => {
-    const f = await setup(t, { onCreate: () => new Response(null, {
-      status: 307, headers: { location, "set-cookie": cookie },
-    }) });
-    assert.equal((await f.request()).statusCode, 502);
-    assert.equal(f.saved.creation_state, "unknown");
-    assert.equal(f.creates.length, 1);
+for (const challengeCookie of [undefined, "challenge=fixture", "testcookie=fixture"]) {
+  await test(`same-origin 307 with ${challengeCookie ?? "no cookie"} preserves the POST, body, and UUID`, async (t) => {
+    const f = await setup(t, { onCreate(payload, count) {
+      if (count === 1) {
+        const headers = { location: "/v1/order/create?challenge=1" };
+        if (challengeCookie) headers["set-cookie"] = `${challengeCookie}; Secure`;
+        return new Response(null, { status: 307, headers });
+      }
+      return success(payload);
+    } });
+    assert.equal((await f.request()).statusCode, 201);
+    assert.equal(f.creates.length, 2);
+    const [initial, replay] = f.creates;
+    assert.equal(initial.method, "POST");
+    assert.equal(replay.method, "POST");
+    assert.equal(replay.url, "https://api-delivery.ozon.ru/v1/order/create?challenge=1");
+    assert.equal(replay.body, initial.body);
+    assert.equal(replay.body, f.saved.creation_body);
+    assert.match(f.saved.creation_key, /^[0-9a-f-]{36}$/);
+    assert.equal(initial.headers["Idempotency-Key"], f.saved.creation_key);
+    assert.equal(replay.headers["Idempotency-Key"], f.saved.creation_key);
+    assert.equal(replay.headers.Authorization, initial.headers.Authorization);
+    assert.equal(replay.headers.Cookie, challengeCookie);
   });
 }
+
+for (const [label, status, location, reason] of [
+  ["cross-origin redirect", 307, "https://untrusted.example/v1/order/create", "cross_origin"],
+  ["HTTPS downgrade", 307, "http://api-delivery.ozon.ru/v1/order/create", "cross_origin"],
+  ["changed path", 307, "/v1/order/checkout", "path_changed"],
+  ["302 without testcookie", 302, "/v1/order/create", "missing_testcookie"],
+]) {
+  await test(`blocks ${label} without replaying the mutation`, async (t) => {
+    const logger = t.mock.method(console, "error", () => {});
+    const headers = { location };
+    if (status === 307) headers["set-cookie"] = "challenge=fixture";
+    const f = await setup(t, { onCreate: () => new Response(null, { status, headers }) });
+    const response = await f.request();
+    assert.equal(response.statusCode, 502);
+    assert.equal(response.json().code, "CREATE_OUTCOME_UNKNOWN");
+    assert.equal(f.saved.creation_state, "unknown");
+    assert.equal(f.creates.length, 1);
+    assert.equal(logger.mock.calls[0].arguments[0].redirectReason, reason);
+  });
+}
+
+await test("stops a same-origin 307 loop at the existing attempt limit", async (t) => {
+  const logger = t.mock.method(console, "error", () => {});
+  const f = await setup(t, { onCreate: () => new Response(null, {
+    status: 307, headers: { location: "/v1/order/create?challenge=loop" },
+  }) });
+  const response = await f.request();
+  assert.equal(response.statusCode, 502);
+  assert.equal(response.json().code, "CREATE_OUTCOME_UNKNOWN");
+  assert.equal(f.saved.creation_state, "unknown");
+  assert.equal(f.creates.length, 5);
+  const [diagnostic] = logger.mock.calls[0].arguments;
+  assert.equal(diagnostic.category, "redirect_rejection");
+  assert.equal(diagnostic.redirectReason, "limit_exceeded");
+  assert.equal(diagnostic.upstreamStatus, 307);
+});
 
 const traceId = "a0b1c2d3e4f567890123456789abcdef";
 
