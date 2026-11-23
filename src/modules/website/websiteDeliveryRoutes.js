@@ -97,7 +97,8 @@ import {
   
           const result =
             await checkOzonDeliveryClient(
-              phone
+              phone,
+              { logTiming: (timing) => request.log.info(timing, "Ozon check-client timing") }
             );
   
   
@@ -109,10 +110,6 @@ import {
           };
   
         } catch (error) {
-  
-          request.log.error(
-            error
-          );
   
   
           const statusCode =

@@ -35,7 +35,7 @@ export const OZON_STANDARD_PARCEL_DESCRIPTION = "Perfume";
  *
  * Ozon Delivery uses OAuth client_credentials.
  */
-export async function getOzonDeliveryAccessToken({ signal, diagnostics } = {}) {
+export async function getOzonDeliveryAccessToken({ signal, diagnostics, onStatus } = {}) {
   const clientId =
     process.env.OZON_DELIVERY_CLIENT_ID;
 
@@ -89,6 +89,7 @@ export async function getOzonDeliveryAccessToken({ signal, diagnostics } = {}) {
 
 
   if (diagnostics) diagnostics.response = response;
+  onStatus?.(response.status);
 
   if (!response.ok) {
     if (diagnostics) throw new Error("Ozon Delivery OAuth failed");
@@ -136,14 +137,17 @@ export async function ozonDeliveryRequest(
     idempotencyKey,
     diagnostics,
     beforeRequest,
+    checkClientTiming,
   } = {}
 ) {
   if (diagnostics) {
     diagnostics.phase = "oauth";
     diagnostics.sensitiveValues.push(process.env.OZON_DELIVERY_CLIENT_SECRET);
   }
-  const token =
-    await getOzonDeliveryAccessToken({ signal, diagnostics });
+  const token = checkClientTiming
+    ? await timedCheckClientToken(signal, checkClientTiming.log)
+    : await getOzonDeliveryAccessToken({ signal, diagnostics });
+  if (checkClientTiming) checkClientTiming.eligibilityStartedAt = performance.now();
   if (diagnostics) {
     diagnostics.phase = "delivery";
     diagnostics.response = undefined;
@@ -211,6 +215,7 @@ export async function ozonDeliveryRequest(
 
 
     if (diagnostics) diagnostics.response = response;
+    if (checkClientTiming) checkClientTiming.eligibilityStatus = response.status;
 
     if (
       response.status !== 302 &&
@@ -291,8 +296,34 @@ export async function ozonDeliveryRequest(
 // Customer eligibility
 // --------------------------------------------------
 
+function logCheckClientTiming(log, phase, startedAt, httpStatus, outcome) {
+  log({
+    phase,
+    durationMs: performance.now() - startedAt,
+    ...(httpStatus === undefined ? {} : { httpStatus }),
+    outcome,
+  });
+}
+
+async function timedCheckClientToken(signal, log) {
+  const startedAt = performance.now();
+  let httpStatus;
+  let outcome = "failure";
+  try {
+    const token = await getOzonDeliveryAccessToken({
+      signal,
+      onStatus: (status) => { httpStatus = status; },
+    });
+    outcome = "success";
+    return token;
+  } finally {
+    logCheckClientTiming(log, "access-token", startedAt, httpStatus, outcome);
+  }
+}
+
 export async function checkOzonDeliveryClient(
-  phone
+  phone,
+  { logTiming } = {}
 ) {
   const normalizedPhone =
     String(
@@ -320,34 +351,47 @@ export async function checkOzonDeliveryClient(
   }
 
 
-  const response =
-    await ozonDeliveryRequest(
-      "/v1/delivery/check-client",
-      {
-        body: {
-          phone_number:
-            `+${normalizedPhone}`,
-        },
-      }
-    );
+  const checkClientTiming = logTiming ? { log: logTiming } : undefined;
+  let outcome = "failure";
+  try {
+    const response =
+      await ozonDeliveryRequest(
+        "/v1/delivery/check-client",
+        {
+          checkClientTiming,
+          body: {
+            phone_number:
+              `+${normalizedPhone}`,
+          },
+        }
+      );
 
 
-  const data =
-    await response.json();
+    const data =
+      await response.json();
 
 
-  if (!response.ok) {
-    throw new Error(
-      `Ozon Delivery check-client failed (${response.status}): ${JSON.stringify(data)}`
-    );
+    if (!response.ok) {
+      throw new Error(
+        `Ozon Delivery check-client failed (${response.status}): ${JSON.stringify(data)}`
+      );
+    }
+
+
+    const canBeDelivered = data.can_be_delivered === true;
+    outcome = "success";
+    return { canBeDelivered };
+  } finally {
+    if (checkClientTiming?.eligibilityStartedAt !== undefined) {
+      logCheckClientTiming(
+        logTiming,
+        "eligibility",
+        checkClientTiming.eligibilityStartedAt,
+        checkClientTiming.eligibilityStatus,
+        outcome
+      );
+    }
   }
-
-
-  return {
-    canBeDelivered:
-      data.can_be_delivered ===
-      true,
-  };
 }
 
 
