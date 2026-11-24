@@ -211,10 +211,10 @@ const perfumeDetailsSchema = {
 export const getPerfumesSchema = {
   tags: ["Perfumes"],
 
-  summary: "Get all perfumes",
+  summary: "Get active perfumes",
 
   description:
-    "Returns the complete canonical perfume catalogue with brand information, volume variants and website images.",
+    "Returns the active perfume catalogue with brand information, volume variants and website images.",
 
   response: {
     200: {
@@ -238,7 +238,7 @@ export const getPerfumeByIdSchema = {
   summary: "Get one perfume",
 
   description:
-    "Returns one perfume by ID with brand information, volume variants, website images and all marketplace SKU mappings.",
+    "Returns an active perfume by ID with brand information, volume variants and website images. Archived perfumes return 404.",
 
   params: {
     type: "object",

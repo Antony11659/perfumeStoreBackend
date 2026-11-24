@@ -13,7 +13,7 @@ export default async function perfumeRoutes(fastify) {
   /**
    * GET /perfumes
    *
-   * Returns the complete canonical perfume catalog:
+   * Returns the active perfume catalog:
    * - perfume information
    * - brand
    * - volume variants
@@ -24,6 +24,7 @@ export default async function perfumeRoutes(fastify) {
   fastify.get("/", {
     schema: getPerfumesSchema,
   }, async (request, reply) => {
+    reply.header("Cache-Control", "no-store");
   
     const { data, error } = await supabase
       .from("perfumes")
@@ -53,6 +54,7 @@ export default async function perfumeRoutes(fastify) {
           is_primary
         )
       `)
+      .eq("is_archived", false)
       .order("name");
   
     if (error) {
@@ -82,19 +84,18 @@ export default async function perfumeRoutes(fastify) {
   /**
    * GET /perfumes/:id
    *
-   * Returns everything needed to manage one perfume:
+   * Returns public catalog information for one active perfume:
    * - perfume information
    * - brand
    * - volume variants
    * - website images
-   * - marketplace products/SKUs
-   * - shop information
    */
 
 
   fastify.get("/:id", {
     schema: getPerfumeByIdSchema,
   }, async (request, reply) => {
+    reply.header("Cache-Control", "no-store");
     const { id: perfumeId } = request.params;
   
     const { data, error } = await supabase
@@ -126,6 +127,7 @@ export default async function perfumeRoutes(fastify) {
         )
       `)
       .eq("id", perfumeId)
+      .eq("is_archived", false)
       .maybeSingle();
   
     if (error) {

@@ -33,7 +33,7 @@ const shops = {
     }
   
     return {
-      post: async (path, body) => {
+      post: async (path, body, { signal, redirect } = {}) => {
         const response = await fetch(
           `https://api-seller.ozon.ru${path}`,
           {
@@ -46,6 +46,8 @@ const shops = {
             },
   
             body: JSON.stringify(body),
+          signal,
+          redirect,
           }
         );
   

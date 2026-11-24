@@ -185,6 +185,31 @@ await test("initial order uses trusted data and RPC only, with existing 201 resp
   assert.equal(state.payments, 0);
 });
 
+await test("both checkout aliases reject archived variants before calling providers", async () => {
+  for (const url of ["/orders", "/website/orders"]) {
+    reset();
+    state.variants[0].perfume = { is_archived: true };
+    const result = await request(payload(), randomUUID(), url);
+    assert.equal(result.statusCode, 409);
+    assert.equal(result.json().code, "WEBSITE_PERFUME_ARCHIVED");
+    assert.equal(state.ozon.length, 0);
+    assert.equal(state.rpcCalls.length, 1);
+  }
+});
+
+await test("both checkout aliases return unavailable merchandise when archive wins at persistence", async () => {
+  for (const url of ["/orders", "/website/orders"]) {
+    reset();
+    state.rpcFailure = args => args.p_prepared
+      ? { error: { code: "PT409", message: "WEBSITE_PERFUME_ARCHIVED" } }
+      : mockPersist(args);
+    const result = await request(payload(), randomUUID(), url);
+    assert.equal(result.statusCode, 409);
+    assert.equal(result.json().code, "WEBSITE_PERFUME_ARCHIVED");
+    assert.equal(state.orders.length, 0);
+  }
+});
+
 await test("completed retry across both aliases returns original response without validation", async () => {
   for (const [first, second] of [["/orders", "/website/orders"], ["/website/orders", "/orders"]]) {
     reset(); const key = randomUUID();

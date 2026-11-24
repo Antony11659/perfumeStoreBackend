@@ -6,6 +6,8 @@ import cors from "@fastify/cors";
 import swagger from "@fastify/swagger";
 import swaggerUi from "@fastify/swagger-ui";
 
+import { supabase } from "./lib/supabase.js";
+import erpRoutes, { erpBearer } from "./modules/erp/erpRoutes.js";
 import brandsRoutes from "./modules/perfumes/brandsRoutes.js";
 import perfumeRoutes from "./modules/perfumes/perfumesRoutes.js";
 import ozonRoutes from "./modules/ozon/ozonRoutes.js";
@@ -46,7 +48,9 @@ await fastify.register(swagger, {
       description: "API for managing the perfume catalogue and ERP operations",
       version: "1.0.0",
     },
+    components: { securitySchemes: { erpBearer } },
     tags: [
+      { name: "ERP", description: "Staff-only ERP endpoints" },
       {
         name: "Perfumes",
         description: "Perfume catalogue endpoints",
@@ -71,6 +75,12 @@ await fastify.register(swagger, {
 
 await fastify.register(swaggerUi, {
   routePrefix: "/documentation",
+});
+
+await fastify.register(erpRoutes, {
+  prefix: "/erp",
+  getUser: (token) => supabase.auth.getUser(token),
+  db: supabase,
 });
 
 await fastify.register(perfumeRoutes, {

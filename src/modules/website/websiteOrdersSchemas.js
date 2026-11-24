@@ -4,7 +4,7 @@ export const createWebsiteOrderSchema = {
   summary: "Create website order",
 
   description:
-    "Creates a new order from the LaDePurfum website. Prices, totals and delivery details are calculated by the backend. Send a stable Idempotency-Key UUID for one checkout attempt. Completed retries return the original response with HTTP 201. Different requests with the same key return 409. ORDER_IN_PROGRESS (409) and persistence failures (503) require retrying the same key and body; a timeout does not prove rollback. During compatibility rollout, omitted keys are accepted without retry deduplication.",
+    "Creates a new order from the LaDePurfum website. Prices, totals and delivery details are calculated by the backend. Send a stable Idempotency-Key UUID for one checkout attempt. Completed retries return the original response with HTTP 201. Different requests with the same key return 409. ORDER_IN_PROGRESS (409) and persistence failures (503) require retrying the same key and body; a timeout does not prove rollback. New purchases containing archived perfumes return WEBSITE_PERFUME_ARCHIVED (409). During compatibility rollout, omitted keys are accepted without retry deduplication.",
 
   headers: {
     type: "object",
@@ -252,7 +252,7 @@ export const createWebsiteOrderSchema = {
       type: "object",
       properties: {
         success: { type: "boolean" },
-        code: { type: "string", enum: ["IDEMPOTENCY_KEY_CONFLICT", "ORDER_IN_PROGRESS"] },
+        code: { type: "string", enum: ["IDEMPOTENCY_KEY_CONFLICT", "ORDER_IN_PROGRESS", "WEBSITE_PERFUME_ARCHIVED"] },
         message: { type: "string" },
       },
     },

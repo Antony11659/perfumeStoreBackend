@@ -44,6 +44,11 @@ function normalizeWebsiteOrder(payload) {
   };
 }
 
+function archivedPerfumeError() {
+  return orderRequestError(409, "WEBSITE_PERFUME_ARCHIVED",
+    "One or more perfumes are no longer available. Refresh your cart before checking out.");
+}
+
 async function persistWebsiteOrder(key, hash, prepared = null) {
   let result;
   try {
@@ -53,7 +58,10 @@ async function persistWebsiteOrder(key, hash, prepared = null) {
       p_prepared: prepared,
     }).abortSignal(AbortSignal.timeout(10000));
     if (result.error) throw result.error;
-  } catch {
+  } catch (error) {
+    if (error?.code === "PT409" && error.message === "WEBSITE_PERFUME_ARCHIVED") {
+      throw archivedPerfumeError();
+    }
     // Transport failure/timeout may follow a successful commit. Never fall back
     // to separate inserts or replace the key; resolve with the same key/body.
     throw orderRequestError(503, "ORDER_PERSISTENCE_UNAVAILABLE",
@@ -130,7 +138,8 @@ export async function createWebsiteOrder(payload, idempotencyKey) {
     .select(`
       id,
       perfume_id,
-      volume_ml
+      volume_ml,
+      perfume:perfumes(is_archived)
     `)
     .in("id", variantIds);
 
@@ -157,6 +166,10 @@ export async function createWebsiteOrder(payload, idempotencyKey) {
     throw error;
   }
 
+
+  if (variants.some(variant => variant.perfume?.is_archived === true)) {
+    throw archivedPerfumeError();
+  }
 
   // --------------------------------------------------
   // 3. Create fast variant lookup
