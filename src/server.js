@@ -1,3 +1,7 @@
+import { createImagePublisher } from "./modules/erp/erpImagePublication.js";
+import { createMasterStorage } from "./modules/erp/erpImagePublicationStorage.js";
+import { isAbsolute } from "node:path";
+import { createStudioRunner } from "./modules/erp/erpImageStudioRunner.js";
 import "dotenv/config";
 
 import Fastify from "fastify";
@@ -23,6 +27,24 @@ import ozonSellerOAuthRoutes from "./modules/delivery/ozonSeller/ozonSellerOAuth
 
 
 import { saveRaspivSession, getRaspivSession } from "./temporary/raspiv.js"; // should be deleted 
+
+const imageStudioEnabled = process.env.NODE_ENV === "development" && process.env.ERP_IMAGE_STUDIO_ENABLED === "true";
+const workerRoot = process.env.ERP_IMAGE_WORKER_ROOT;
+if (imageStudioEnabled && (!workerRoot || !isAbsolute(workerRoot))) {
+  throw new Error("ERP_IMAGE_WORKER_ROOT must be an absolute local path when Image Studio is enabled.");
+}
+
+const publicationEnabled = imageStudioEnabled && process.env.ERP_IMAGE_PUBLICATION_ENABLED === "true";
+const imagePublisher = publicationEnabled ? createImagePublisher({
+  db: supabase, workerRoot,
+  storage: createMasterStorage({
+    endpoint: process.env.ERP_IMAGE_S3_ENDPOINT,
+    bucket: process.env.ERP_IMAGE_S3_BUCKET,
+    region: process.env.ERP_IMAGE_S3_REGION,
+    accessKeyId: process.env.ERP_IMAGE_S3_ACCESS_KEY_ID,
+    secretAccessKey: process.env.ERP_IMAGE_S3_SECRET_ACCESS_KEY,
+  }),
+}) : undefined;
 
 const fastify = Fastify({
   logger: true,
@@ -81,6 +103,8 @@ await fastify.register(erpRoutes, {
   prefix: "/erp",
   getUser: (token) => supabase.auth.getUser(token),
   db: supabase,
+  imageStudioRunner: imageStudioEnabled ? createStudioRunner(workerRoot) : undefined,
+  imagePublisher,
 });
 
 await fastify.register(perfumeRoutes, {
@@ -172,7 +196,7 @@ const start = async () => {
   try {
     await fastify.listen({
       port: 3000,
-      host: "0.0.0.0",
+      host: imageStudioEnabled ? "127.0.0.1" : "0.0.0.0",
     });
   } catch (error) {
     fastify.log.error(error);

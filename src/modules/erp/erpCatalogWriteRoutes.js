@@ -26,6 +26,7 @@ function schema({ kind, create, fields, required }) {
   return {
     tags: ["ERP"],
     summary: `${create ? "Create" : "Update"} ERP ${kind}`,
+    ...(!create && perfume && { description: "Corrects catalog fields in place, including for mapped or previously ordered perfumes." }),
     security: [{ erpBearer: [] }],
     ...(!create && { params: object({ id }) }),
     body: { ...object(fields, required), minProperties: 1 },

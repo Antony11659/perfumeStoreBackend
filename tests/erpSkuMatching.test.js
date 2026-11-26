@@ -60,6 +60,7 @@ test("staff protects all routes and batch replay does not overwrite changed or c
   const app = Fastify();
   t.after(() => app.close());
   const mapped = [];
+  const detached = [{ id: mappingId, sku: "789", shop_id: shop.id }];
   let archived = false;
   const calls = [];
   const db = {
@@ -72,7 +73,7 @@ test("staff protects all routes and batch replay does not overwrite changed or c
           assert.equal(value, false);
           return query;
         },
-        range: async () => ({ data: { shops: [shop], perfumes: archived ? [] : [perfume], shop_products: mapped }[table] }),
+        range: async () => ({ data: { shops: [shop], perfumes: archived ? [] : [perfume], shop_products: mapped, erp_unmatched_skus: detached }[table] }),
       };
       return query;
     } }),
@@ -88,6 +89,8 @@ test("staff protects all routes and batch replay does not overwrite changed or c
       const data = { id: mappingId, sku: input.p_sku, shop_id: input.p_shop_id, perfume_id: input.p_perfume_id,
         volume_ml: input.p_volume_ml, is_active: true, is_archived: false, updated_at: stamp };
       mapped.push(data);
+      const detachedIndex = detached.findIndex(row => row.sku === input.p_sku);
+      if (detachedIndex >= 0) detached.splice(detachedIndex, 1);
       return { data };
     },
   };
@@ -108,6 +111,14 @@ test("staff protects all routes and batch replay does not overwrite changed or c
   }
   assert.equal(calls.length, 0);
   assert.equal((await request("GET",base)).json()[0].stats, null);
+  const matching = base + "/" + shop.id + "/matching";
+  const retained = await request("GET", matching + "?status=unmatched");
+  assert.equal(retained.statusCode, 200);
+  assert.deepEqual(retained.json().items.map(row => row.sku), ["789"]);
+  const rematched = await request("POST", batch, { records: [{ sku: "789", perfume_id: perfume.id, volume_ml: 10 }] });
+  assert.equal(rematched.json().results[0].status, "registered");
+  assert.equal((await request("GET", matching + "?status=unmatched")).json().total, 0);
+  mapped.length = 0;
   assert.equal((await request("POST","/erp/marketplaces/sync",{})).statusCode, 202);
   await new Promise(resolve => setImmediate(resolve));
   const matches = await request("GET",base+"/"+shop.id+"/matching?pageSize=1&status=unmatched");

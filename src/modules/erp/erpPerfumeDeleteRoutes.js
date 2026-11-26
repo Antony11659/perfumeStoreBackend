@@ -28,7 +28,6 @@ function failure(reply, pgError) {
     case "23503": {
       const blocker = safeDependencies(pgError.details);
       const reasons = [
-        blocker?.skuMappings && "marketplace SKU mappings",
         blocker?.websiteOrderItems && "historical website order items",
         blocker?.images && "registered images",
         blocker?.unverifiedForeignKeys && "unverified database relationships",
@@ -55,10 +54,10 @@ export default async function erpPerfumeDeleteRoutes(fastify, { db }) {
       url: preview ? "/perfumes/:id/dependencies" : "/perfumes/:id",
       schema: {
         tags: ["ERP"],
-        summary: preview ? "Preview perfume deletion dependencies" : "Permanently delete an unreferenced perfume",
+        summary: preview ? "Preview perfume deletion dependencies" : "Delete a perfume and unmatch its SKUs",
         description: preview
-          ? "Includes all SKU statuses, historical website order items, and registered images. Variants alone do not block deletion."
-          : "Rechecks dependencies under database locks. Unused volume variants cascade. SKU mappings, order items, and registered images block deletion.",
+          ? "Reports how many SKUs will become unmatched and checks protections for order history and image publication."
+          : "Atomically detaches marketplace SKUs and removes the perfume and variants. Historical order and image publication dependencies are protected.",
         security: [{ erpBearer: [] }],
         params: object({ id }),
         response: {

@@ -52,6 +52,36 @@ export const catalogSchemas = {
     description: "Defaults to active perfumes. Counts include the entire catalog; total reflects the search, filters and selected status.",
     result: perfumeList, querystring: listQuery,
   },
+  imageLibraryStats: {
+    summary: "Get central image library statistics",
+    description: "Master image records include all archive states. Coverage counts distinct active perfumes with a primary master. When no perfumes are active, coverage is zero.",
+    result: object({
+      totalPerfumes: integer, activePerfumes: integer, archivedPerfumes: integer, masterImageRecords: integer,
+      activeWithPrimaryMaster: integer, activeWithoutPrimaryMaster: integer,
+      activeCoveragePercent: { type: "number", minimum: 0, maximum: 100 },
+    }),
+  },
+  imageLibraryPerfumes: {
+    summary: "List perfumes and their registered primary master in the image library",
+    description: "Returns one row per perfume, ordered by name then ID. When multiple primary masters exist, the lowest sort order then lowest ID determines the preview. image_url is the registered preview URL.",
+    querystring: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        q: { type: "string", maxLength: 100, description: "Case-insensitive literal substring of the perfume or brand name" },
+        view: {
+          type: "string", enum: ["active", "missing", "registered", "archived"], default: "active",
+          description: "All active perfumes, active perfumes without or with a primary master, or archived perfumes only",
+        },
+        page: { ...listQuery.properties.page, description: "One-based page number" },
+        pageSize: { ...listQuery.properties.pageSize, description: "Maximum number of perfumes per page" },
+      },
+    },
+    result: object({
+      items: array(object({ id, name: text, brand, is_archived: boolean, primary_master_image: nullable(image) })),
+      total: integer, page: integer, pageSize: integer,
+    }),
+  },
   detail: {
     summary: "Get perfume general information, including archived records",
     result: object({ ...perfume, fragrance_family: nullable(text), created_at: text, updated_at: text }),

@@ -33,7 +33,10 @@ test("catalog routes are read-only, documented and guarded before database acces
   const fetch = t.mock.fn(() => { throw Error("Unexpected database access"); });
   const app = await setup(t, fetch);
   const paths = Object.entries(app.swagger().paths).filter(([path, operations]) => path !== "/erp/me" && !path.startsWith("/erp/marketplaces/") && !path.endsWith("/dependencies") && operations.get);
-  assert.equal(paths.length, 8);
+  assert.equal(paths.length, 10);
+  const library = app.swagger().paths["/erp/image-library/perfumes"].get;
+  assert.deepEqual(library.parameters.map(({ name }) => name).sort(), ["page", "pageSize", "q", "view"]);
+  assert.deepEqual(Object.keys(library.responses), ["200", "400", "401", "403", "503"]);
   for (const [path, operations] of paths) {
     assert.ok(operations.get);
     assert.deepEqual(operations.get.security, [{ erpBearer: [] }]);
@@ -44,6 +47,7 @@ test("catalog routes are read-only, documented and guarded before database acces
   assert.equal((await app.inject({ url: "/erp/perfumes?pageSize=51", headers: staff })).statusCode, 400);
   assert.equal((await app.inject({ url: "/erp/perfumes?status=invalid", headers: staff })).statusCode, 400);
   assert.equal((await app.inject({ url: "/erp/perfumes/9223372036854775808", headers: staff })).statusCode, 400);
+  assert.equal((await app.inject({ url: "/erp/image-library/perfumes?view=invalid", headers: staff })).statusCode, 400);
   assert.equal(fetch.mock.callCount(), 0);
 });
 
@@ -92,4 +96,61 @@ test("SKU ambiguity flags only active, unarchived records in the same shop and v
   assert.equal(response.statusCode, 200);
   assert.equal(response.json().length, mappings.length);
   assert.deepEqual(response.json().filter(row => row.ambiguous).map(row => row.sku), ["0001", "0002"]);
+});
+
+test("image coverage counts parents with a primary master independently of master record count", async (t) => {
+  for (const active of [10, 0]) {
+    const app = await setup(t, async (input, init) => {
+      const url = new URL(input);
+      assert.equal(init.method, "HEAD");
+      assert.equal(init.headers.get("Prefer"), "count=exact");
+      let count;
+      if (url.pathname.endsWith("/perfume_images")) {
+        assert.equal(url.searchParams.get("image_type"), "eq.master");
+        count = 5;
+      } else if (url.searchParams.get("select") === "id,master:perfume_images!inner()") {
+        assert.equal(url.searchParams.get("is_archived"), "eq.false");
+        assert.equal(url.searchParams.get("master.image_type"), "eq.master");
+        assert.equal(url.searchParams.get("master.is_primary"), "eq.true");
+        count = active ? 2 : 0;
+      } else {
+        assert.equal(url.searchParams.get("select"), "id");
+        count = url.searchParams.get("is_archived") === "eq.true" ? 3 : active;
+      }
+      return new Response(null, { headers: { "Content-Range": `*/${count}` } });
+    });
+
+    const response = await app.inject({ url: "/erp/image-library/stats", headers: staff });
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(response.json(), {
+      totalPerfumes: active + 3, activePerfumes: active, archivedPerfumes: 3, masterImageRecords: 5,
+      activeWithPrimaryMaster: active ? 2 : 0, activeWithoutPrimaryMaster: active ? 8 : 0,
+      activeCoveragePercent: active ? 20 : 0,
+    });
+  }
+});
+
+test("image library keeps the exact filtered total past the last page", async (t) => {
+  const fetch = t.mock.fn(async (input, init) => {
+    const url = new URL(input);
+    assert.equal(url.pathname, "/rest/v1/perfumes");
+    assert.equal(url.searchParams.get("is_archived"), "eq.false");
+    assert.equal(url.searchParams.get("master"), "not.is.null");
+    assert.equal(url.searchParams.get("brand_search.name"), "imatch.Fixture");
+    assert.equal(init.headers.get("Prefer"), "count=exact");
+    if (init.method === "HEAD") {
+      assert.equal(url.searchParams.has("offset"), false);
+      return new Response(null, { headers: { "Content-Range": "*/5" } });
+    }
+    assert.equal(init.method, "GET");
+    assert.equal(url.searchParams.get("offset"), "100");
+    return Response.json({ code: "PGRST103", message: "Requested range not satisfiable" }, { status: 416 });
+  });
+  const app = await setup(t, fetch);
+  const response = await app.inject({
+    url: "/erp/image-library/perfumes?view=registered&q=Fixture&page=5", headers: staff,
+  });
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(response.json(), { items: [], total: 5, page: 5, pageSize: 25 });
+  assert.equal(fetch.mock.callCount(), 2);
 });

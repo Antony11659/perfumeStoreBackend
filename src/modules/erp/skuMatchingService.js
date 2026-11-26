@@ -110,18 +110,23 @@ export function suggestMatch(productName, perfumes) {
   return { perfumeId: best?.id ?? null, perfumeName: best?.name ?? null, brandName: best?.brand?.name ?? null, volumeMl, extractedVolume };
 }
 
-export function compareProducts(shopId, products, mappings, perfumes) {
+export function compareProducts(shopId, products, mappings, perfumes, detached = []) {
   const bySku = new Map(mappings.map(row => [row.sku, row]));
   const groups = new Map();
   for (const mapping of mappings.filter(eligible)) {
     const key = groupKey(mapping);
     groups.set(key, (groups.get(key) ?? 0) + 1);
   }
-  const rows = products.map(product => {
+  const reserved = new Map(detached.map(row => [row.sku, row]));
+  const visible = new Set(products.map(row => row.sku));
+  const retained = detached.filter(row => row.shop_id === shopId && !visible.has(row.sku))
+    .map(row => ({ sku: row.sku, name: row.sku, imageUrl: null, offerId: null }));
+  const rows = [...products, ...retained].map(product => {
     const found = bySku.get(product.sku);
+    const reservation = reserved.get(product.sku);
     let status = "unmatched";
     if (product.catalogCollision) status = "catalogConflict";
-    else if (found && found.shop_id !== shopId) status = "otherShop";
+    else if ((found ?? reservation) && (found ?? reservation).shop_id !== shopId) status = "otherShop";
     else if (found?.is_archived) status = "archived";
     else if (found && !found.is_active) status = "inactive";
     else if (found) status = groups.get(groupKey(found)) > 1 ? "ambiguous" : "matched";
@@ -140,10 +145,13 @@ export function readComparisonCatalog(db) {
   return Promise.all([
     readPages(db, "shop_products", "id,sku,shop_id,perfume_id:perfume_id::text,volume_ml,is_active,is_archived"),
     readPages(db, "perfumes", "id:id::text,name,brand:brands(name),variants:perfume_variants(volume_ml)", true),
+    readDetachedSkus(db),
   ]);
 }
 
 export async function readComparison(db, shopId, products) {
-  const [mappings, perfumes] = await readComparisonCatalog(db);
-  return compareProducts(shopId, products, mappings, perfumes);
+  const [mappings, perfumes, detached] = await readComparisonCatalog(db);
+  return compareProducts(shopId, products, mappings, perfumes, detached);
 }
+
+export const readDetachedSkus = db => readPages(db, "erp_unmatched_skus", "id,sku,shop_id");

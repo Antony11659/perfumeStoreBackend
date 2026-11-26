@@ -1,6 +1,6 @@
 import { createOzonClient } from "../ozon/ozonClient.js";
 import { bigint, createSku, errorSchema, maxId, object, skuFailure, skuText, standardErrors, text, uuid, volume } from "./erpSkuRoutes.js";
-import { compareProducts, fetchVisibleProducts, readComparison, readComparisonCatalog, readShops } from "./skuMatchingService.js";
+import { compareProducts, fetchVisibleProducts, readComparison, readComparisonCatalog, readDetachedSkus, readShops } from "./skuMatchingService.js";
 
 const nullable = schema => ({ ...schema, nullable: true });
 const array = items => ({ type: "array", items });
@@ -33,11 +33,11 @@ export default async function erpMatchingRoutes(fastify, { db, ozonFactory = cre
     const revision = ++comparisonRevision;
     const ready = [...snapshots].filter(([, entry]) => entry.state === "ready");
     if (!ready.length) return;
-    const [mappings, perfumes] = await readComparisonCatalog(db);
+    const [mappings, perfumes, detached] = await readComparisonCatalog(db);
     if (revision !== comparisonRevision) return;
     for (const [shopId, entry] of ready) {
       if (snapshots.get(shopId) === entry) {
-        entry.comparison = compareProducts(shopId, entry.products, mappings, perfumes);
+        entry.comparison = compareProducts(shopId, entry.products, mappings, perfumes, detached);
       }
     }
   }
@@ -112,6 +112,7 @@ export default async function erpMatchingRoutes(fastify, { db, ozonFactory = cre
   const params = object({ shopId: uuid });
   route("GET", "/marketplaces/shops/:shopId/matching", "Get matching results for the last marketplace sync using the current catalog", {
     params,
+    description: "Includes persisted detached SKUs, even when they are absent from the latest marketplace snapshot.",
     querystring: object({
       page: { type: "integer", minimum: 1, default: 1 },
       pageSize: { type: "integer", minimum: 1, maximum: 100, default: 25 },
@@ -119,32 +120,37 @@ export default async function erpMatchingRoutes(fastify, { db, ozonFactory = cre
       q: { ...text, maxLength: 100 },
     }, []),
     response: { 200: object({ items: array(row), total: count, stats, lastSync: stamps, page: count, pageSize: count }),
-      409: errorSchema("Sync must complete before results are available") },
+      404: errorSchema("Shop not found") },
   }, async ({ params, query }, reply) => {
     const entry = snapshots.get(params.shopId);
-    if (entry?.state !== "ready") return reply.code(409).send({ code: "ERP_SYNC_REQUIRED", message: "Complete a shop synchronization first." });
+    const ready = entry?.state === "ready";
+    if (!ready && !(await readShops(db)).some(shop => shop.id === params.shopId)) {
+      return reply.code(404).send({ code: "ERP_SHOP_NOT_FOUND", message: "Shop not found." });
+    }
     const term = query.q?.trim().toLowerCase();
-    const comparison = await readComparison(db, params.shopId, entry.products);
+    const comparison = await readComparison(db, params.shopId, ready ? entry.products : []);
     const rows = comparison.rows.filter(item => (!query.status || item.status === query.status) && (
       !term || [item.name, item.sku, item.offerId].some(value => value?.toLowerCase().includes(term))
     ));
     const offset = (query.page - 1) * query.pageSize;
     return { items: rows.slice(offset, offset + query.pageSize), total: rows.length, stats: comparison.stats,
-      lastSync: entry.lastSync, page: query.page, pageSize: query.pageSize };
+      lastSync: ready ? entry.lastSync : null, page: query.page, pageSize: query.pageSize };
   });
 
   route("POST", "/marketplaces/shops/:shopId/mappings/batch", "Register explicitly approved internal mappings", {
-    description: "Each row commits independently. An identical, active mapping can be replayed. Conflicts never overwrite existing rows.",
+    description: "Accepts SKUs from the current shop snapshot or the persisted unmatched collection. Each row commits independently and conflicts preserve existing mappings.",
     params, body: object({ records: { ...array(batchRecord), minItems: 1, maxItems: 50 } }),
     response: { 200: object({ results: array(batchResult), comparisonRefreshed: flag }) },
   }, async ({ params, body }, reply) => {
     const entry = snapshots.get(params.shopId);
-    if (entry?.state !== "ready") return reply.code(409).send({ code: "ERP_SYNC_REQUIRED", message: "Complete a shop synchronization first." });
     if (body.records.some(record => BigInt(record.perfume_id) > maxId) ||
         new Set(body.records.map(record => record.sku.trim())).size !== body.records.length) {
       return reply.code(400).send({ code: "ERP_INVALID_BATCH", message: "Use valid perfume IDs and include each SKU once." });
     }
-    const scope = new Map(entry.products.map(product => [product.sku, product]));
+    const scope = new Map((entry?.state === "ready" ? entry.products : []).map(product => [product.sku, product]));
+    for (const row of await readDetachedSkus(db)) {
+      if (row.shop_id === params.shopId && !scope.has(row.sku)) scope.set(row.sku, row);
+    }
     const results = [];
     for (const record of body.records) {
       const sku = record.sku.trim();

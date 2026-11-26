@@ -2,6 +2,7 @@ import { catalogSchema, catalogSchemas } from "./erpCatalogSchemas.js";
 
 const brand = "brand:brands(id,name,country)";
 const general = `id:id::text,name,gender,${brand},fragrance_family,created_at,updated_at,is_archived,archived_at`;
+const imageFields = "id:id::text,image_url,sort_order,is_primary,storage_key,image_type,width_px,height_px,size_bytes,mime_type";
 const shop = "id,name,code,marketplace,is_active";
 
 function safeSearch(value) {
@@ -93,6 +94,71 @@ async function listPerfumes(db, query) {
   };
 }
 
+function primaryMaster(request) {
+  return request.eq("master.image_type", "master").eq("master.is_primary", true);
+}
+
+async function imageLibraryStats(db) {
+  const perfumeCount = () => db.from("perfumes").select("id", { count: "exact", head: true });
+  const results = await Promise.all([
+    perfumeCount().eq("is_archived", false),
+    perfumeCount().eq("is_archived", true),
+    db.from("perfume_images").select("id", { count: "exact", head: true }).eq("image_type", "master"),
+    // The filtered inner embed tests for existence; its count is on the parent perfume rows.
+    primaryMaster(db.from("perfumes").select("id,master:perfume_images!inner()", { count: "exact", head: true }))
+      .eq("is_archived", false),
+  ]);
+  const [activePerfumes, archivedPerfumes, masterImageRecords, activeWithPrimaryMaster] = results.map((result) => {
+    if (result.error || !Number.isInteger(result.count)) throw new Error("Image library count missing");
+    return result.count;
+  });
+  if (activeWithPrimaryMaster > activePerfumes) throw new Error("Inconsistent image library counts");
+  return {
+    totalPerfumes: activePerfumes + archivedPerfumes, activePerfumes, archivedPerfumes, masterImageRecords,
+    activeWithPrimaryMaster, activeWithoutPrimaryMaster: activePerfumes - activeWithPrimaryMaster,
+    activeCoveragePercent: activePerfumes ? (activeWithPrimaryMaster / activePerfumes) * 100 : 0,
+  };
+}
+
+async function imageLibraryPerfumes(db, { q, view, page, pageSize }) {
+  const term = q?.trim();
+  const brandSearch = term ? ",brand_search:brands()" : "";
+  function filteredRequest(head = false) {
+    const select = head
+      ? `id,master:perfume_images()${brandSearch}`
+      : `id:id::text,name,is_archived,${brand},master:perfume_images(${imageFields})${brandSearch}`;
+    let request = primaryMaster(db.from("perfumes").select(select, { count: "exact", head }))
+      .eq("is_archived", view === "archived");
+    if (term) {
+      const pattern = safeSearch(term);
+      request = request.filter("brand_search.name", "imatch", pattern)
+        .or(`name.imatch.${logicValue(pattern)},brand_search.not.is.null`);
+    }
+    if (view === "missing") request = request.is("master", null);
+    if (view === "registered") request = request.not("master", "is", null);
+    return request;
+  }
+
+  const first = (page - 1) * pageSize;
+  const result = await filteredRequest()
+    .order("sort_order", { referencedTable: "master" }).order("id", { referencedTable: "master" })
+    .limit(1, { referencedTable: "master" }).order("name").order("id").range(first, first + pageSize - 1);
+
+  // The client omits the count on an unsatisfiable range. Read the filtered count separately.
+  if (result.status === 416 && result.error?.code === "PGRST103") {
+    const { count, error } = await filteredRequest(true);
+    if (!error && Number.isInteger(count) && first >= count) return { items: [], total: count, page, pageSize };
+  }
+  const rows = databaseResult(result);
+  if (!Number.isInteger(result.count)) throw new Error("Image library count missing");
+  return {
+    items: rows.map(({ id, name, brand, is_archived, master }) => ({
+      id, name, brand, is_archived, primary_master_image: master[0] ?? null,
+    })),
+    total: result.count, page, pageSize,
+  };
+}
+
 async function perfumeRecord(db, id, select, configure = (request) => request) {
   return databaseResult(await configure(db.from("perfumes").select(select).eq("id", id)).maybeSingle());
 }
@@ -134,6 +200,8 @@ export default async function erpCatalogRoutes(fastify, { db }) {
     });
   }
 
+  route("/image-library/stats", "imageLibraryStats", () => imageLibraryStats(db));
+  route("/image-library/perfumes", "imageLibraryPerfumes", ({ query }) => imageLibraryPerfumes(db, query));
   route("/perfumes", "list", ({ query }) => listPerfumes(db, query));
   route("/perfumes/:id", "detail", ({ params }) => perfumeRecord(db, params.id, general), true);
   route("/perfumes/:id/variants", "variants", async ({ params }) => {
@@ -148,7 +216,7 @@ export default async function erpCatalogRoutes(fastify, { db }) {
   }, true);
   route("/perfumes/:id/images", "images", async ({ params }) => {
     const row = await perfumeRecord(db, params.id,
-      "images:perfume_images(id:id::text,image_url,sort_order,is_primary,storage_key,image_type,width_px,height_px,size_bytes,mime_type)",
+      `images:perfume_images(${imageFields})`,
       (request) => request.eq("images.image_type", "master").order("sort_order", { referencedTable: "images" })
         .order("id", { referencedTable: "images" }));
     return row === null ? null : row.images;

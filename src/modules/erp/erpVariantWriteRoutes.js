@@ -53,7 +53,7 @@ function failure(reply, pgError) {
 
 export default async function erpVariantWriteRoutes(fastify, { db }) {
   for (const [method, summary] of [
-    ["POST", "Create a volume variant"], ["PATCH", "Change a variant's volume"], ["DELETE", "Delete an unreferenced variant"],
+    ["POST", "Create a volume variant"], ["PATCH", "Change a variant's volume"], ["DELETE", "Delete a variant and unmatch its SKUs"],
   ]) {
     const create = method === "POST";
     const remove = method === "DELETE";
@@ -63,7 +63,9 @@ export default async function erpVariantWriteRoutes(fastify, { db }) {
       schema: {
         tags: ["ERP"],
         summary,
-        description: "IDs are decimal strings. A volume change or deletion is blocked while website orders or SKU mappings reference the variant.",
+        description: remove
+          ? "Detaches any SKU mappings. Historical website order references prevent variant deletion."
+          : "IDs are decimal strings. A volume correction keeps the variant ID and updates its SKU mappings.",
         security: [{ erpBearer: [] }],
         params: object(create ? { id } : { id, variantId: id }),
         ...(!remove && { body: object({ volume_ml: volume }) }),

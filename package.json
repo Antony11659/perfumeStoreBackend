@@ -21,6 +21,7 @@
   "homepage": "https://github.com/Antony11659/perfumeStoreBackend#readme",
   "description": "",
   "dependencies": {
+    "@aws-sdk/client-s3": "3.1177.0",
     "@fastify/cors": "^11.3.0",
     "@fastify/swagger": "^9.8.1",
     "@fastify/swagger-ui": "^6.1.1",

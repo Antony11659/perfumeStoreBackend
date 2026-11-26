@@ -4,6 +4,7 @@ import erpSkuRoutes from "./erpSkuRoutes.js";
 import erpMatchingRoutes from "./erpMatchingRoutes.js";
 import erpVariantWriteRoutes from "./erpVariantWriteRoutes.js";
 import erpCatalogWriteRoutes from "./erpCatalogWriteRoutes.js";
+import erpImageStudioRoutes from "./erpImageStudioRoutes.js";
 import erpCatalogRoutes from "./erpCatalogRoutes.js";
 import { requireErpStaff } from "./erpAuth.js";
 
@@ -18,12 +19,13 @@ function errorSchema(description, code) {
   };
 }
 
-export default async function erpRoutes(fastify, { getUser, db }) {
+export default async function erpRoutes(fastify, { getUser, db, imageStudioRunner, imagePublisher }) {
   fastify.decorateRequest("erpStaff", null);
   fastify.addHook("onRequest", requireErpStaff(getUser));
 
   if (db) {
     fastify.register(erpCatalogRoutes, { db });
+    if (imageStudioRunner) fastify.register(erpImageStudioRoutes, { db, runner: imageStudioRunner, publisher: imagePublisher });
     fastify.register(erpCatalogWriteRoutes, { db });
     fastify.register(erpPerfumeDeleteRoutes, { db });
     fastify.register(erpPerfumeArchiveRoutes, { db });

@@ -27,7 +27,7 @@ export function skuFailure(error) {
     case "23505": return [409, "ERP_SKU_DUPLICATE", "This SKU is already registered. Existing mappings have been preserved."];
     case "40001":
     case "40P01": return [409, "ERP_SKU_STALE", "The mapping changed or was busy. Reload it before retrying."];
-    case "P0001": return [409, "ERP_SKU_DEPENDENCY", "Existing fulfillment or historical use prevents this change."];
+    case "P0001": return [409, "ERP_SKU_DEPENDENCY", "This shop does not support the requested SKU status change."];
     case "PT409": return [409, "ERP_SKU_FULFILLMENT", "This Raspiv volume already has an eligible mapping."];
     case "PT404": return [404, "ERP_SKU_NOT_FOUND", "Shop or mapping not found for this perfume."];
     case "22023":
@@ -60,13 +60,14 @@ export default async function erpSkuRoutes(fastify, { db, onWrite }) {
       url: add ? path : path + "/:skuId",
       schema: {
         tags: ["ERP"], security: [{ erpBearer: [] }],
-        summary: add ? "Register an internal marketplace SKU" : edit ? "Update eligible internal SKU status" : "Check permanent SKU deletion eligibility",
+        summary: add ? "Register an internal marketplace SKU" : edit ? "Correct or transfer an internal SKU mapping" : "Unmatch a SKU and retain its marketplace identity",
         description: add ? "Global SKU uniqueness is enforced. A second eligible Raspiv mapping for the same variant is blocked."
-          : edit ? "Requires the exact updated_at version. Identity changes and Raspiv status changes are blocked."
-          : "Ownership is verified. Deletion is blocked while historical marketplace usage cannot be established.",
+          : edit ? "Requires the exact updated_at version and a registered target volume. Global SKU uniqueness and shop fulfillment rules apply."
+          : "Removes the internal association and retains the SKU and shop for rematching. Supply updated_at to reject a stale unmatch.",
         params: object(add ? { id: bigint } : { id: bigint, skuId: uuid }),
+        ...(method === "DELETE" && { querystring: object({ updated_at: stamp }, []) }),
         ...(method !== "DELETE" && { body: { ...body, minProperties: edit ? 2 : 3 } }),
-        response: { ...(method !== "DELETE" && { [add ? 201 : 200]: mapping }), ...standardErrors },
+        response: { [add ? 201 : 200]: add || edit ? mapping : object({ id: uuid }), ...standardErrors },
       },
       async preValidation(request, reply) {
         if (request.body && typeof request.body === "object" && (("sku" in request.body && typeof request.body.sku !== "string")
@@ -90,14 +91,19 @@ export default async function erpSkuRoutes(fastify, { db, onWrite }) {
             if (patch.sku) patch.sku = patch.sku.trim();
             result = await db.rpc("erp_update_sku_v1", { p_perfume_id: id, p_sku_id: skuId, p_expected_updated_at: expected_updated_at, p_patch: patch });
           } else {
-            result = await db.rpc("erp_delete_sku_v1", { p_perfume_id: id, p_sku_id: skuId });
+            const args = { p_perfume_id: id, p_sku_id: skuId };
+            result = request.query.updated_at
+              ? await db.rpc("erp_unmatch_sku_v1", { ...args, p_expected_updated_at: request.query.updated_at })
+              : await db.rpc("erp_delete_sku_v1", args);
           }
-          if (result.data && !result.error && (add || edit)) {
+          if (result.data && !result.error) {
             try { await onWrite?.(); }
             catch { request.log.warn({ event: "erp_sku_comparison_refresh_failed" }); }
             return reply.code(add ? 201 : 200).send(result.data);
           }
-          const [status, code, message] = skuFailure(result.error);
+          const [status, code, message] = method === "DELETE" && result.error?.code === "23503"
+            ? [409, "ERP_SKU_DEPENDENCY", "Related records prevent unmatching this SKU."]
+            : skuFailure(result.error);
           return reply.code(status).send({ code, message });
         } catch {
           return reply.code(503).send({ code: "ERP_SKU_UNAVAILABLE", message: "SKU operations are temporarily unavailable." });
